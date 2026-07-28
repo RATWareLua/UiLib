@@ -15,6 +15,9 @@ local win = NierUI:Window({
     Title = "VIOLENCE DISTRICT",
     Subtitle = "SYSTEM MENU / v1.0",
     Hint = "hover a row to read what it does",
+    -- Обязательно, если пользуешься профилями: библиотека не придумывает имя
+    -- папки сама.
+    ConfigFolder = "nierui-demo",
 })
 ENV.__nierDemo = win
 
@@ -502,6 +505,23 @@ more:Button({
             OnCancel = function() win:Notify({ Title = "MODAL", Text = "Cancelled." }) end,
         })
     end,
+})
+
+more:Divider()
+
+-- Настройки строки по правой кнопке: то же окно, что у пунктов списка, но для
+-- обычной строки. Тип контрола выводится из значения по умолчанию, EnumItem
+-- даёт захват клавиши.
+more:Toggle({
+    Text = "ROW SETTINGS",
+    Desc = "Right-click this row: a key and a colour of its own. All of it is saved.",
+    Default = true, Flag = "rowSettings",
+    Settings = {
+        Key = Enum.KeyCode.F,
+        Colour = Color3.fromRGB(255, 200, 60),
+        Outline = true,
+    },
+    OnSetting = function(field, value) print("[demo] row setting:", field, value) end,
 })
 
 more:Divider()

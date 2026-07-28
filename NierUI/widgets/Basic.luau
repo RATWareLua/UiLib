@@ -31,7 +31,34 @@ NierUI.widget("Toggle", function(tab, opts)
 
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
+    -- Свои настройки по правой кнопке. Значения по умолчанию копируются в
+    -- собственное состояние: править переданный spec нельзя, он может быть
+    -- общей таблицей.
+    local settings
+    if opts.Settings then
+        settings = {}
+        for key, default in pairs(opts.Settings) do settings[key] = default end
+        rowApi.settings(tab.window, opts.Text or "", opts.Settings, settings, opts.OnSetting)
+    end
+
     return NierUI.bind(tab, opts, {
+        -- Настройки строки идут в профиль наравне со значением: клавиша,
+        -- цвет и режим -- такие же настройки, как сам тумблер.
+        --
+        -- SettingsFlat говорит кодеку, что уровень тут один: у списка настройки
+        -- разложены по пунктам, у строки -- нет.
+        SettingsFlat = true,
+        SettingsMap = function(_) return settings or {} end,
+
+        GetSetting = function(_, key) return settings and settings[key] end,
+        SetSetting = function(_, key, v)
+            if not settings then return end
+            settings[key] = v
+            -- Загрузка профиля обязана ПРИМЕНИТЬ настройку, а не только
+            -- запомнить: иначе меню показывает новую клавишу, а работает старая.
+            if opts.OnSetting then pcall(opts.OnSetting, key, v) end
+        end,
+
         Set = function(_, on, silent) set(on, silent) end,
         Get = function(_) return state end,
         SetEnabled = function(_, on) rowApi.setEnabled(on) end,

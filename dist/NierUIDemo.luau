@@ -1021,6 +1021,31 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         fn(false, enabled)
     end
 
+    --== настройки строки по правой кнопке ===================================
+    --
+    -- Тот же механизм, что у пунктов списка, но для ЛЮБОЙ строки. Раньше
+    -- настройки были привилегией пунктов, хотя причина этому была только
+    -- историческая: строке они нужны ничуть не реже -- клавиша активации,
+    -- дополнительный цвет, режим.
+    --
+    -- Строка с настройками помечается точкой справа: без метки правая кнопка --
+    -- знание, которое неоткуда взять.
+    function rowApi.settings(window, title, spec, state, onChange)
+        if not spec or next(spec) == nil then return end
+
+        U.new("Frame", {
+            BackgroundColor3 = THEME.Ink, BackgroundTransparency = 0.4,
+            BorderSizePixel = 0, Active = false,
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, -2, 0, math.floor(THEME.RowHeight / 2)),
+            Size = UDim2.fromOffset(4, 4), ZIndex = 3,
+        }, row)
+
+        table.insert(window.conns, row.MouseButton2Click:Connect(gate(function()
+            NierUI.optionSettings(window, row, title, spec, state, onChange)
+        end)))
+    end
+
     function rowApi.setEnabled(state)
         enabled = state ~= false
         -- Поле ввода надо гасить отдельно: оно принимает фокус само, минуя
@@ -1271,7 +1296,10 @@ function NierUI:Window(opts)
         notifyLayer = false,
         notifications = {},
         triggerSeq = 0,
-        name = opts.Name or opts.Title or "NierUI",
+        -- Папку конфигов задаёт ТОЛЬКО вызывающий. Выводить её из заголовка
+        -- окна нельзя: заголовок меняется по вкусу, и каждая его правка
+        -- оставляла бы на диске новую папку с осиротевшими профилями.
+        configFolder = opts.ConfigFolder or false,
         current = false,
         visible = true,
         -- Точка последнего нажатия. MouseButton1Click координат не несёт, а
@@ -2216,10 +2244,22 @@ local function ensureFolder(path)
     if not isfolder(path) then makefolder(path) end
 end
 
+-- Папку задаёт вызывающий, и её отсутствие -- ОШИБКА, а не повод придумать
+-- имя самому. Придуманное имя означает, что при первой же смене заголовка окна
+-- профили окажутся в новой папке, а старые останутся лежать сиротами.
 local function folderOf(window)
-    -- Имя окна попадает в путь, поэтому чистим всё, что не годится в имя файла.
-    local safe = tostring(window.name):gsub("[^%w _%-]", "")
-    if safe == "" then safe = "window" end
+    local folder = window.configFolder
+    if not folder or folder == "" then
+        error("[NierUI] не задана папка конфигов -- "
+            .. "NierUI:Window({ ConfigFolder = \"myscript\" })", 3)
+    end
+
+    -- Имя попадает в путь, поэтому чистим всё, что не годится в имя файла.
+    local safe = tostring(folder):gsub("[^%w _%-]", "")
+    if safe == "" then
+        error(("[NierUI] в ConfigFolder «%s» не осталось ни одного пригодного символа")
+            :format(tostring(folder)), 3)
+    end
     return ROOT .. "/" .. safe
 end
 
@@ -2281,11 +2321,18 @@ local function collect(window)
         if ok then
             local entry = { value = encode(value) }
 
-            -- Настройки пунктов списка живут отдельно от значения: без них
-            -- сохранённый набор вернулся бы без цветов и флагов.
+            -- Настройки живут отдельно от значения: без них сохранённый набор
+            -- вернулся бы без цветов, клавиш и флагов.
+            --
+            -- Форм две, и виджет сообщает свою сам. У списка настройки лежат по
+            -- пунктам -- это два уровня; у строки уровень один. Догадываться по
+            -- виду таблицы нельзя: настройка пункта сама может быть таблицей.
             if handle.SettingsMap then
                 local okS, map = pcall(handle.SettingsMap, handle)
-                if okS and next(map) ~= nil then entry.settings = encode(map) end
+                if okS and next(map) ~= nil then
+                    entry.settings = encode(map)
+                    entry.flat = handle.SettingsFlat == true
+                end
             end
 
             data[flag] = entry
@@ -2304,9 +2351,16 @@ local function apply(window, data)
             missing[#missing + 1] = flag
         else
             if entry.settings and handle.SetSetting then
-                for key, fields in pairs(decode(entry.settings)) do
-                    for name, v in pairs(fields) do
-                        pcall(handle.SetSetting, handle, key, name, v)
+                local map = decode(entry.settings)
+                if entry.flat then
+                    for field, v in pairs(map) do
+                        pcall(handle.SetSetting, handle, field, v)
+                    end
+                else
+                    for key, fields in pairs(map) do
+                        for name, v in pairs(fields) do
+                            pcall(handle.SetSetting, handle, key, name, v)
+                        end
                     end
                 end
             end
@@ -3033,11 +3087,14 @@ end)(NierUI)
 --
 --     Settings = { NAMES = { Color = Color3.fromRGB(255,255,255), Outline = true } }
 --
--- Color3 -- образец с палитрой, boolean -- переключатель. Описывать тип
--- вручную значило бы держать его в двух местах и однажды разойтись.
+-- Color3 -- образец с палитрой, boolean -- переключатель, EnumItem -- захват
+-- клавиши. Описывать тип вручную значило бы держать его в двух местах и
+-- однажды разойтись.
 --
 -- Порядок строк -- по алфавиту ключей. Порядок обхода хеша в Lua не определён,
 -- и без сортировки настройки перемешивались бы при каждом открытии.
+
+local UserInputService = game:GetService("UserInputService")
 
 local THEME = NierUI.Theme
 local U = NierUI.util
@@ -3143,6 +3200,58 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 })
             end))
 
+        elseif typeof(current) == "EnumItem" then
+            -- Захват клавиши. Пока ждём нажатие, строка помечена и подсвечена:
+            -- иначе непонятно, что окно чего-то ждёт.
+            local value = U.new("TextLabel", {
+                BackgroundTransparency = 1, Font = THEME.Font,
+                Text = current.Name, TextColor3 = THEME.InkSoft,
+                TextSize = THEME.TextSize,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -10, 0, 0),
+                Size = UDim2.fromOffset(110, ROW), ZIndex = z + 1,
+            }, rowBtn)
+
+            local listening = false
+
+            local function paint()
+                rowBtn.BackgroundTransparency = listening and 0 or 1
+                label.TextColor3 = listening and THEME.Bg or THEME.Ink
+                value.TextColor3 = listening and THEME.Bg or THEME.InkSoft
+            end
+
+            table.insert(conns, rowBtn.MouseEnter:Connect(function()
+                if listening then return end
+                rowBtn.BackgroundTransparency = 0
+                label.TextColor3 = THEME.Bg
+                value.TextColor3 = THEME.Bg
+            end))
+            table.insert(conns, rowBtn.MouseLeave:Connect(function()
+                if listening then return end
+                paint()
+            end))
+
+            table.insert(conns, rowBtn.MouseButton1Click:Connect(function()
+                listening = true
+                value.Text = "[ ... ]"
+                paint()
+            end))
+
+            table.insert(conns, UserInputService.InputBegan:Connect(function(input, processed)
+                if not listening then return end
+                if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+                listening = false
+                -- Escape отменяет назначение, а не назначает Escape.
+                if input.KeyCode ~= Enum.KeyCode.Escape then
+                    state[key] = input.KeyCode
+                    if onChange then pcall(onChange, key, input.KeyCode) end
+                end
+                value.Text = (state[key] or spec[key]).Name
+                paint()
+            end))
+
         elseif type(current) == "boolean" then
             local value = U.new("TextLabel", {
                 BackgroundTransparency = 1, Font = THEME.Font,
@@ -3214,7 +3323,34 @@ NierUI.widget("Toggle", function(tab, opts)
 
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
+    -- Свои настройки по правой кнопке. Значения по умолчанию копируются в
+    -- собственное состояние: править переданный spec нельзя, он может быть
+    -- общей таблицей.
+    local settings
+    if opts.Settings then
+        settings = {}
+        for key, default in pairs(opts.Settings) do settings[key] = default end
+        rowApi.settings(tab.window, opts.Text or "", opts.Settings, settings, opts.OnSetting)
+    end
+
     return NierUI.bind(tab, opts, {
+        -- Настройки строки идут в профиль наравне со значением: клавиша,
+        -- цвет и режим -- такие же настройки, как сам тумблер.
+        --
+        -- SettingsFlat говорит кодеку, что уровень тут один: у списка настройки
+        -- разложены по пунктам, у строки -- нет.
+        SettingsFlat = true,
+        SettingsMap = function(_) return settings or {} end,
+
+        GetSetting = function(_, key) return settings and settings[key] end,
+        SetSetting = function(_, key, v)
+            if not settings then return end
+            settings[key] = v
+            -- Загрузка профиля обязана ПРИМЕНИТЬ настройку, а не только
+            -- запомнить: иначе меню показывает новую клавишу, а работает старая.
+            if opts.OnSetting then pcall(opts.OnSetting, key, v) end
+        end,
+
         Set = function(_, on, silent) set(on, silent) end,
         Get = function(_) return state end,
         SetEnabled = function(_, on) rowApi.setEnabled(on) end,
@@ -3982,7 +4118,11 @@ local function build(tab, opts, multi)
         end,
         SetSetting = function(_, key, field, v)
             local store = settings[key]
-            if store then store[field] = v end
+            if not store then return end
+            store[field] = v
+            -- Как и у строки: загрузка профиля применяет настройку, а не
+            -- только запоминает.
+            if opts.OnSetting then pcall(opts.OnSetting, key, field, v) end
         end,
         Settings = function(_, key)
             return settings[key]
@@ -4525,6 +4665,9 @@ local win = NierUI:Window({
     Title = "VIOLENCE DISTRICT",
     Subtitle = "SYSTEM MENU / v1.0",
     Hint = "hover a row to read what it does",
+    -- Обязательно, если пользуешься профилями: библиотека не придумывает имя
+    -- папки сама.
+    ConfigFolder = "nierui-demo",
 })
 ENV.__nierDemo = win
 
@@ -5012,6 +5155,23 @@ more:Button({
             OnCancel = function() win:Notify({ Title = "MODAL", Text = "Cancelled." }) end,
         })
     end,
+})
+
+more:Divider()
+
+-- Настройки строки по правой кнопке: то же окно, что у пунктов списка, но для
+-- обычной строки. Тип контрола выводится из значения по умолчанию, EnumItem
+-- даёт захват клавиши.
+more:Toggle({
+    Text = "ROW SETTINGS",
+    Desc = "Right-click this row: a key and a colour of its own. All of it is saved.",
+    Default = true, Flag = "rowSettings",
+    Settings = {
+        Key = Enum.KeyCode.F,
+        Colour = Color3.fromRGB(255, 200, 60),
+        Outline = true,
+    },
+    OnSetting = function(field, value) print("[demo] row setting:", field, value) end,
 })
 
 more:Divider()

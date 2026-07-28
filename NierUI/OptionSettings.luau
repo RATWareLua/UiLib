@@ -11,11 +11,14 @@
 --
 --     Settings = { NAMES = { Color = Color3.fromRGB(255,255,255), Outline = true } }
 --
--- Color3 -- образец с палитрой, boolean -- переключатель. Описывать тип
--- вручную значило бы держать его в двух местах и однажды разойтись.
+-- Color3 -- образец с палитрой, boolean -- переключатель, EnumItem -- захват
+-- клавиши. Описывать тип вручную значило бы держать его в двух местах и
+-- однажды разойтись.
 --
 -- Порядок строк -- по алфавиту ключей. Порядок обхода хеша в Lua не определён,
 -- и без сортировки настройки перемешивались бы при каждом открытии.
+
+local UserInputService = game:GetService("UserInputService")
 
 local THEME = NierUI.Theme
 local U = NierUI.util
@@ -119,6 +122,58 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                         if onChange then pcall(onChange, key, c) end
                     end,
                 })
+            end))
+
+        elseif typeof(current) == "EnumItem" then
+            -- Захват клавиши. Пока ждём нажатие, строка помечена и подсвечена:
+            -- иначе непонятно, что окно чего-то ждёт.
+            local value = U.new("TextLabel", {
+                BackgroundTransparency = 1, Font = THEME.Font,
+                Text = current.Name, TextColor3 = THEME.InkSoft,
+                TextSize = THEME.TextSize,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -10, 0, 0),
+                Size = UDim2.fromOffset(110, ROW), ZIndex = z + 1,
+            }, rowBtn)
+
+            local listening = false
+
+            local function paint()
+                rowBtn.BackgroundTransparency = listening and 0 or 1
+                label.TextColor3 = listening and THEME.Bg or THEME.Ink
+                value.TextColor3 = listening and THEME.Bg or THEME.InkSoft
+            end
+
+            table.insert(conns, rowBtn.MouseEnter:Connect(function()
+                if listening then return end
+                rowBtn.BackgroundTransparency = 0
+                label.TextColor3 = THEME.Bg
+                value.TextColor3 = THEME.Bg
+            end))
+            table.insert(conns, rowBtn.MouseLeave:Connect(function()
+                if listening then return end
+                paint()
+            end))
+
+            table.insert(conns, rowBtn.MouseButton1Click:Connect(function()
+                listening = true
+                value.Text = "[ ... ]"
+                paint()
+            end))
+
+            table.insert(conns, UserInputService.InputBegan:Connect(function(input, processed)
+                if not listening then return end
+                if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+                listening = false
+                -- Escape отменяет назначение, а не назначает Escape.
+                if input.KeyCode ~= Enum.KeyCode.Escape then
+                    state[key] = input.KeyCode
+                    if onChange then pcall(onChange, key, input.KeyCode) end
+                end
+                value.Text = (state[key] or spec[key]).Name
+                paint()
             end))
 
         elseif type(current) == "boolean" then

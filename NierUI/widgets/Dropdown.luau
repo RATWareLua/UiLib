@@ -482,7 +482,11 @@ local function build(tab, opts, multi)
         end,
         SetSetting = function(_, key, field, v)
             local store = settings[key]
-            if store then store[field] = v end
+            if not store then return end
+            store[field] = v
+            -- Как и у строки: загрузка профиля применяет настройку, а не
+            -- только запоминает.
+            if opts.OnSetting then pcall(opts.OnSetting, key, field, v) end
         end,
         Settings = function(_, key)
             return settings[key]

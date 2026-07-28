@@ -198,6 +198,31 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         fn(false, enabled)
     end
 
+    --== настройки строки по правой кнопке ===================================
+    --
+    -- Тот же механизм, что у пунктов списка, но для ЛЮБОЙ строки. Раньше
+    -- настройки были привилегией пунктов, хотя причина этому была только
+    -- историческая: строке они нужны ничуть не реже -- клавиша активации,
+    -- дополнительный цвет, режим.
+    --
+    -- Строка с настройками помечается точкой справа: без метки правая кнопка --
+    -- знание, которое неоткуда взять.
+    function rowApi.settings(window, title, spec, state, onChange)
+        if not spec or next(spec) == nil then return end
+
+        U.new("Frame", {
+            BackgroundColor3 = THEME.Ink, BackgroundTransparency = 0.4,
+            BorderSizePixel = 0, Active = false,
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, -2, 0, math.floor(THEME.RowHeight / 2)),
+            Size = UDim2.fromOffset(4, 4), ZIndex = 3,
+        }, row)
+
+        table.insert(window.conns, row.MouseButton2Click:Connect(gate(function()
+            NierUI.optionSettings(window, row, title, spec, state, onChange)
+        end)))
+    end
+
     function rowApi.setEnabled(state)
         enabled = state ~= false
         -- Поле ввода надо гасить отдельно: оно принимает фокус само, минуя

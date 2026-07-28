@@ -61,10 +61,22 @@ local function ensureFolder(path)
     if not isfolder(path) then makefolder(path) end
 end
 
+-- Папку задаёт вызывающий, и её отсутствие -- ОШИБКА, а не повод придумать
+-- имя самому. Придуманное имя означает, что при первой же смене заголовка окна
+-- профили окажутся в новой папке, а старые останутся лежать сиротами.
 local function folderOf(window)
-    -- Имя окна попадает в путь, поэтому чистим всё, что не годится в имя файла.
-    local safe = tostring(window.name):gsub("[^%w _%-]", "")
-    if safe == "" then safe = "window" end
+    local folder = window.configFolder
+    if not folder or folder == "" then
+        error("[NierUI] не задана папка конфигов -- "
+            .. "NierUI:Window({ ConfigFolder = \"myscript\" })", 3)
+    end
+
+    -- Имя попадает в путь, поэтому чистим всё, что не годится в имя файла.
+    local safe = tostring(folder):gsub("[^%w _%-]", "")
+    if safe == "" then
+        error(("[NierUI] в ConfigFolder «%s» не осталось ни одного пригодного символа")
+            :format(tostring(folder)), 3)
+    end
     return ROOT .. "/" .. safe
 end
 
@@ -126,11 +138,18 @@ local function collect(window)
         if ok then
             local entry = { value = encode(value) }
 
-            -- Настройки пунктов списка живут отдельно от значения: без них
-            -- сохранённый набор вернулся бы без цветов и флагов.
+            -- Настройки живут отдельно от значения: без них сохранённый набор
+            -- вернулся бы без цветов, клавиш и флагов.
+            --
+            -- Форм две, и виджет сообщает свою сам. У списка настройки лежат по
+            -- пунктам -- это два уровня; у строки уровень один. Догадываться по
+            -- виду таблицы нельзя: настройка пункта сама может быть таблицей.
             if handle.SettingsMap then
                 local okS, map = pcall(handle.SettingsMap, handle)
-                if okS and next(map) ~= nil then entry.settings = encode(map) end
+                if okS and next(map) ~= nil then
+                    entry.settings = encode(map)
+                    entry.flat = handle.SettingsFlat == true
+                end
             end
 
             data[flag] = entry
@@ -149,9 +168,16 @@ local function apply(window, data)
             missing[#missing + 1] = flag
         else
             if entry.settings and handle.SetSetting then
-                for key, fields in pairs(decode(entry.settings)) do
-                    for name, v in pairs(fields) do
-                        pcall(handle.SetSetting, handle, key, name, v)
+                local map = decode(entry.settings)
+                if entry.flat then
+                    for field, v in pairs(map) do
+                        pcall(handle.SetSetting, handle, field, v)
+                    end
+                else
+                    for key, fields in pairs(map) do
+                        for name, v in pairs(fields) do
+                            pcall(handle.SetSetting, handle, key, name, v)
+                        end
                     end
                 end
             end

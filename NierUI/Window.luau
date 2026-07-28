@@ -163,7 +163,10 @@ function NierUI:Window(opts)
         notifyLayer = false,
         notifications = {},
         triggerSeq = 0,
-        name = opts.Name or opts.Title or "NierUI",
+        -- Папку конфигов задаёт ТОЛЬКО вызывающий. Выводить её из заголовка
+        -- окна нельзя: заголовок меняется по вкусу, и каждая его правка
+        -- оставляла бы на диске новую папку с осиротевшими профилями.
+        configFolder = opts.ConfigFolder or false,
         current = false,
         visible = true,
         -- Точка последнего нажатия. MouseButton1Click координат не несёт, а
