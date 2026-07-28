@@ -31,6 +31,8 @@ $parts = @(
     'NierUI\Window.luau'
     'NierUI\Block.luau'
     'NierUI\Section.luau'
+    'NierUI\Cursor.luau'
+    'NierUI\Capture.luau'
     'NierUI\Config.luau'
     'NierUI\Notify.luau'
     'NierUI\Trigger.luau'

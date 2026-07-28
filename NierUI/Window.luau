@@ -167,6 +167,22 @@ function NierUI:Window(opts)
         -- окна нельзя: заголовок меняется по вкусу, и каждая его правка
         -- оставляла бы на диске новую папку с осиротевшими профилями.
         configFolder = opts.ConfigFolder or false,
+
+        -- Перехват ввода на время, пока меню открыто. По умолчанию включён:
+        -- меню, по которому нельзя щёлкнуть в бою, бесполезно.
+        captureInput = opts.CaptureInput ~= false,
+        captured = false,
+        capturePrev = false,
+        captureConns = false,
+        captureAction = false,
+
+        -- Свой указатель вместо системного. См. Cursor: системный в бою не
+        -- показывается, сколько его ни включай.
+        drawCursor = opts.Cursor ~= false,
+        cursor = false,
+        cursorParts = false,
+        cursorOn = false,
+        cursorConns = false,
         current = false,
         visible = true,
         -- Точка последнего нажатия. MouseButton1Click координат не несёт, а
@@ -177,8 +193,14 @@ function NierUI:Window(opts)
         toggleKey = opts.ToggleKey or Enum.KeyCode.Delete,
     }, Window)
 
-    local width = opts.Width or THEME.WindowWidth
-    local height = opts.Height or THEME.WindowHeight
+    -- Размер зажимается по экрану. Умолчание в 644x483 рассчитано на монитор, а
+    -- на телефоне в альбомной ориентации логическая высота бывает и 414 -- окно
+    -- вылезло бы за край вместе с нижней панелью и кнопкой закрытия. Запас в 16
+    -- пикселей, чтобы рамка не упиралась в самый край.
+    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+        or Vector2.new(1920, 1080)
+    local width = math.min(opts.Width or THEME.WindowWidth, view.X - 16)
+    local height = math.min(opts.Height or THEME.WindowHeight, view.Y - 16)
 
     self.gui = U.new("ScreenGui", {
         Name = U.randomName(),
@@ -329,6 +351,32 @@ function Window:Hint(text)
     self.desc.Text = text or ""
 end
 
+--=============================================================================
+-- КЛАВИША ОТКРЫТИЯ
+--=============================================================================
+--
+-- Меняется на лету и без переподписки: обработчик ввода один и сравнивает с
+-- текущим значением при каждом нажатии. Пересоздавать подписку ради смены
+-- клавиши значило бы получить окно, у которого на секунду нет ни старой
+-- клавиши, ни новой.
+--
+-- Поле toggleKey намеренно не объявлено «внутренним»: менять его напрямую
+-- сработает, но проверки типа не будет, а Enum.KeyCode легко перепутать с
+-- Enum.UserInputType -- тогда меню просто перестанет открываться, молча.
+
+function Window:SetToggleKey(key)
+    if typeof(key) ~= "EnumItem" or key.EnumType ~= Enum.KeyCode then
+        error("[NierUI] SetToggleKey ждёт Enum.KeyCode, получено: "
+            .. typeof(key), 2)
+    end
+    self.toggleKey = key
+    return key
+end
+
+function Window:GetToggleKey()
+    return self.toggleKey
+end
+
 -- Прячем КОРЕНЬ окна, а не весь ScreenGui.
 --
 -- Раньше гасился gui целиком, и вместе с меню исчезали бы уведомления --
@@ -339,6 +387,11 @@ function Window:Toggle(state)
     self.visible = state
     self.root.Visible = state
     if not state then self:ClosePopups() end
+
+    -- Пока меню открыто, ввод принадлежит ему: курсор виден, щелчки и движение
+    -- в игру не уходят. См. Capture.
+    if not self.captureInput then return end
+    if state then self:StartCapture() else self:StopCapture() end
 end
 
 function Window:Destroy()
@@ -347,6 +400,10 @@ function Window:Destroy()
     -- достались бы уже уничтоженные объекты.
     if self.ClosePopups then self:ClosePopups() end
     if self.ClearNotifications then self:ClearNotifications() end
+    -- Перехват ввода надо снять обязательно: он живёт в сервисах, а не в нашем
+    -- дереве, и уничтожение ScreenGui его не отпустит -- курсор остался бы
+    -- висеть, а управление в игре не вернулось бы вовсе.
+    if self.StopCapture then self:StopCapture() end
 
     for _, conn in ipairs(self.conns) do
         pcall(function() conn:Disconnect() end)

@@ -176,7 +176,22 @@ NierUI.widget("Slider", function(tab, opts)
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
-        Set = function(_, v, silent) set(v, silent) end,
+        -- Set НЕ ПРИТЯГИВАЕТ К ШАГУ, как и набор руками.
+        --
+        -- Шаг существует ради перетаскивания: по стопиксельной дорожке точнее
+        -- всё равно не попасть. Но программная установка и загрузка профиля --
+        -- не перетаскивание, и притягивание там теряет данные: при шаге 1000
+        -- сохранённые 65 возвращались как 0, а 500 -- как 1000. Значение,
+        -- которое положили в профиль, обязано вернуться тем же.
+        Set = function(_, v, silent)
+            if silent then
+                local clamped = math.clamp(tonumber(v) or min, min, max)
+                current = math.floor(clamped * roundTo + 0.5) / roundTo
+                render()
+                return
+            end
+            setTyped(tonumber(v) or min)
+        end,
         Get = function(_) return current end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)

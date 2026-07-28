@@ -210,13 +210,20 @@ function NierUI.makeRow(tab, text, desc, valueClass)
     function rowApi.settings(window, title, spec, state, onChange)
         if not spec or next(spec) == nil then return end
 
-        U.new("Frame", {
+        local dot = U.new("Frame", {
             BackgroundColor3 = THEME.Ink, BackgroundTransparency = 0.4,
             BorderSizePixel = 0, Active = false,
             AnchorPoint = Vector2.new(1, 0.5),
             Position = UDim2.new(1, -2, 0, math.floor(THEME.RowHeight / 2)),
             Size = UDim2.fromOffset(4, 4), ZIndex = 3,
         }, row)
+
+        -- Точка нарисована чернилами, а под курсором строка заливается ими же --
+        -- метка сливалась с подложкой и пропадала ровно там, где нужна. Это тот
+        -- самый случай, для которого инверсия и заведена: два вида, обычный и
+        -- под курсором, подписываем свойство и забываем.
+        invert(dot, "BackgroundColor3", THEME.Bg, THEME.Ink)
+        paintRow()
 
         table.insert(window.conns, row.MouseButton2Click:Connect(gate(function()
             NierUI.optionSettings(window, row, title, spec, state, onChange)

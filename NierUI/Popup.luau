@@ -39,6 +39,7 @@
 -- настройки под ней.
 
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 local THEME = NierUI.Theme
 local U = NierUI.util
@@ -55,12 +56,27 @@ function Window:Popup(opts)
     local width = opts.Width or 200
     local height = opts.Height or 120
 
+    -- ДВЕ СИСТЕМЫ ОТСЧЁТА -- ПОПРАВКА ЗДЕСЬ, А НЕ У ВЫЗЫВАЮЩИХ.
+    --
+    -- X и Y сюда приходят из AbsolutePosition якоря -- иначе и неоткуда, у
+    -- строки другого адреса нет. Но у окна IgnoreGuiInset = true, и смещение в
+    -- Position считается от НАСТОЯЩЕГО верха экрана, тогда как AbsolutePosition
+    -- сообщается от границы под верхней панелью.
+    --
+    -- Замерено: панель 58 пикселей, и ровно на столько всплывающие окна вставали
+    -- выше своей строки. Настройки тумблера ПОЛЁТ открывались над ним, а не
+    -- рядом -- достаточно близко, чтобы полгода не вызывать вопросов.
+    --
+    -- Поправку делаем в одном месте: вызывающих у Popup много, и повторять её в
+    -- каждом значит однажды забыть.
+    local inset = GuiService:GetGuiInset()
+
     -- Держим окно в пределах экрана: открытое у нижнего края меню иначе
     -- уезжает за экран целиком.
     local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
         or Vector2.new(1920, 1080)
-    local x = math.clamp(opts.X or 0, 4, math.max(4, view.X - width - 4))
-    local y = math.clamp(opts.Y or 0, 4, math.max(4, view.Y - height - 4))
+    local x = math.clamp((opts.X or 0) + inset.X, 4, math.max(4, view.X - width - 4))
+    local y = math.clamp((opts.Y or 0) + inset.Y, 4, math.max(4, view.Y - height - 4))
 
     local layer = U.new("Frame", {
         BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),

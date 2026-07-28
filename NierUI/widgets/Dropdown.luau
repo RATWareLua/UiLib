@@ -132,8 +132,10 @@ local function build(tab, opts, multi)
             store = {}
             settings[entry.key] = store
         end
+        -- В состоянии лежит ЗНАЧЕНИЕ, а не описание: у ползунка описание
+        -- содержит диапазон, а наружу и в профиль должно уходить число.
         for key, default in pairs(spec) do
-            if store[key] == nil then store[key] = default end
+            if store[key] == nil then store[key] = NierUI.settingDefault(default) end
         end
         return spec, store
     end

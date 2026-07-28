@@ -421,7 +421,18 @@ system:Button({
 })
 
 system:Divider()
-system:Label("Delete toggles this window. Drag it by the header.")
+
+-- Клавиша открытия -- обычная привязка: меняется на лету и сохраняется в
+-- профиль наравне со всем остальным.
+system:Keybind({
+    Text = "MENU KEY",
+    Desc = "Rebind the key that opens this window.",
+    Default = win:GetToggleKey(),
+    Flag = "menuKey",
+    Changed = function(key) win:SetToggleKey(key) end,
+})
+
+system:Label("Drag the window by its header.")
 
 --== секции, колонки и остальные элементы ====================================
 

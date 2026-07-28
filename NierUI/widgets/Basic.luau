@@ -37,7 +37,9 @@ NierUI.widget("Toggle", function(tab, opts)
     local settings
     if opts.Settings then
         settings = {}
-        for key, default in pairs(opts.Settings) do settings[key] = default end
+        for key, default in pairs(opts.Settings) do
+            settings[key] = NierUI.settingDefault(default)
+        end
         rowApi.settings(tab.window, opts.Text or "", opts.Settings, settings, opts.OnSetting)
     end
 

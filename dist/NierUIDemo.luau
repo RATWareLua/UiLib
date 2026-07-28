@@ -1033,13 +1033,20 @@ function NierUI.makeRow(tab, text, desc, valueClass)
     function rowApi.settings(window, title, spec, state, onChange)
         if not spec or next(spec) == nil then return end
 
-        U.new("Frame", {
+        local dot = U.new("Frame", {
             BackgroundColor3 = THEME.Ink, BackgroundTransparency = 0.4,
             BorderSizePixel = 0, Active = false,
             AnchorPoint = Vector2.new(1, 0.5),
             Position = UDim2.new(1, -2, 0, math.floor(THEME.RowHeight / 2)),
             Size = UDim2.fromOffset(4, 4), ZIndex = 3,
         }, row)
+
+        -- Точка нарисована чернилами, а под курсором строка заливается ими же --
+        -- метка сливалась с подложкой и пропадала ровно там, где нужна. Это тот
+        -- самый случай, для которого инверсия и заведена: два вида, обычный и
+        -- под курсором, подписываем свойство и забываем.
+        invert(dot, "BackgroundColor3", THEME.Bg, THEME.Ink)
+        paintRow()
 
         table.insert(window.conns, row.MouseButton2Click:Connect(gate(function()
             NierUI.optionSettings(window, row, title, spec, state, onChange)
@@ -1300,6 +1307,22 @@ function NierUI:Window(opts)
         -- окна нельзя: заголовок меняется по вкусу, и каждая его правка
         -- оставляла бы на диске новую папку с осиротевшими профилями.
         configFolder = opts.ConfigFolder or false,
+
+        -- Перехват ввода на время, пока меню открыто. По умолчанию включён:
+        -- меню, по которому нельзя щёлкнуть в бою, бесполезно.
+        captureInput = opts.CaptureInput ~= false,
+        captured = false,
+        capturePrev = false,
+        captureConns = false,
+        captureAction = false,
+
+        -- Свой указатель вместо системного. См. Cursor: системный в бою не
+        -- показывается, сколько его ни включай.
+        drawCursor = opts.Cursor ~= false,
+        cursor = false,
+        cursorParts = false,
+        cursorOn = false,
+        cursorConns = false,
         current = false,
         visible = true,
         -- Точка последнего нажатия. MouseButton1Click координат не несёт, а
@@ -1310,8 +1333,14 @@ function NierUI:Window(opts)
         toggleKey = opts.ToggleKey or Enum.KeyCode.Delete,
     }, Window)
 
-    local width = opts.Width or THEME.WindowWidth
-    local height = opts.Height or THEME.WindowHeight
+    -- Размер зажимается по экрану. Умолчание в 644x483 рассчитано на монитор, а
+    -- на телефоне в альбомной ориентации логическая высота бывает и 414 -- окно
+    -- вылезло бы за край вместе с нижней панелью и кнопкой закрытия. Запас в 16
+    -- пикселей, чтобы рамка не упиралась в самый край.
+    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+        or Vector2.new(1920, 1080)
+    local width = math.min(opts.Width or THEME.WindowWidth, view.X - 16)
+    local height = math.min(opts.Height or THEME.WindowHeight, view.Y - 16)
 
     self.gui = U.new("ScreenGui", {
         Name = U.randomName(),
@@ -1462,6 +1491,32 @@ function Window:Hint(text)
     self.desc.Text = text or ""
 end
 
+--=============================================================================
+-- КЛАВИША ОТКРЫТИЯ
+--=============================================================================
+--
+-- Меняется на лету и без переподписки: обработчик ввода один и сравнивает с
+-- текущим значением при каждом нажатии. Пересоздавать подписку ради смены
+-- клавиши значило бы получить окно, у которого на секунду нет ни старой
+-- клавиши, ни новой.
+--
+-- Поле toggleKey намеренно не объявлено «внутренним»: менять его напрямую
+-- сработает, но проверки типа не будет, а Enum.KeyCode легко перепутать с
+-- Enum.UserInputType -- тогда меню просто перестанет открываться, молча.
+
+function Window:SetToggleKey(key)
+    if typeof(key) ~= "EnumItem" or key.EnumType ~= Enum.KeyCode then
+        error("[NierUI] SetToggleKey ждёт Enum.KeyCode, получено: "
+            .. typeof(key), 2)
+    end
+    self.toggleKey = key
+    return key
+end
+
+function Window:GetToggleKey()
+    return self.toggleKey
+end
+
 -- Прячем КОРЕНЬ окна, а не весь ScreenGui.
 --
 -- Раньше гасился gui целиком, и вместе с меню исчезали бы уведомления --
@@ -1472,6 +1527,11 @@ function Window:Toggle(state)
     self.visible = state
     self.root.Visible = state
     if not state then self:ClosePopups() end
+
+    -- Пока меню открыто, ввод принадлежит ему: курсор виден, щелчки и движение
+    -- в игру не уходят. См. Capture.
+    if not self.captureInput then return end
+    if state then self:StartCapture() else self:StopCapture() end
 end
 
 function Window:Destroy()
@@ -1480,6 +1540,10 @@ function Window:Destroy()
     -- достались бы уже уничтоженные объекты.
     if self.ClosePopups then self:ClosePopups() end
     if self.ClearNotifications then self:ClearNotifications() end
+    -- Перехват ввода надо снять обязательно: он живёт в сервисах, а не в нашем
+    -- дереве, и уничтожение ScreenGui его не отпустит -- курсор остался бы
+    -- висеть, а управление в игре не вернулось бы вовсе.
+    if self.StopCapture then self:StopCapture() end
 
     for _, conn in ipairs(self.conns) do
         pcall(function() conn:Disconnect() end)
@@ -2179,6 +2243,436 @@ end
 
 end)(NierUI)
 
+--============================ NierUI/Cursor.luau ============================
+;(function(NierUI)
+--!nocheck
+--=============================================================================
+-- Cursor -- собственный указатель
+--=============================================================================
+--
+-- ПОЧЕМУ СВОЙ, А НЕ СИСТЕМНЫЙ
+--
+-- Перехват сначала просто включал MouseIconEnabled и возвращал его, когда игра
+-- гасила. Проверено вживую: щелчки в меню доходят, а курсора нет. Игра прячет
+-- его не одним этим свойством, и спор за него проигрывается молча -- то есть
+-- худшим способом: меню работает, а куда нажимать, непонятно.
+--
+-- Поэтому системный указатель гасится намеренно, а свой рисуется поверх.
+--
+--
+--=============================================================================
+-- ГЕОМЕТРИЯ ЗАДАНА В ФИЗИЧЕСКИХ ПИКСЕЛЯХ. ЭТО ГЛАВНОЕ ЗДЕСЬ.
+--=============================================================================
+--
+-- При дробном масштабе экрана Windows интерфейс рисуется в логических пикселях
+-- и растягивается. Замерено: панель 1920x1080, масштаб 125%, ViewportSize
+-- 1536x864 -- один логический пиксель это 1.25 физического.
+--
+-- Логическая сетка тут не спасает никак, и вот почему. Пусть весь указатель
+-- симметричен и начало координат стоит на целом физическом пикселе. Возьмём
+-- горизонтальную черту с оправой в два логических пикселя: по X её края лягут
+-- как (0.5, 1, 1), а по Y -- как (1, 1, 0.5). Оправа вокруг ОДНОЙ И ТОЙ ЖЕ
+-- черты получает разный вес сбоку и сверху. Это и читается как «съехала».
+--
+-- Ровно она ляжет, только если каждый край попадёт на целую границу
+-- физического пикселя. В логических пикселях при 125% это кратность четырём,
+-- то есть оправа в пять физических пикселей -- неприемлемо толсто.
+--
+-- Поэтому размеры здесь -- В ФИЗИЧЕСКИХ ПИКСЕЛЯХ, а в логические переводятся
+-- дробью. Дробь ВЫЖИВАЕТ ТОЛЬКО В Scale: UDim.Offset сам отбрасывает дробную
+-- часть (проверено -- fromOffset(100.4) даёт ровно 100), а у Scale она
+-- сохраняется (AbsolutePosition показывает 100.400002). Отсюда весь указатель
+-- на долях и ни одного Offset.
+--
+--
+-- ОТКУДА БЕРЁТСЯ МАСШТАБ
+--
+-- Ниоткуда: Roblox физического разрешения не сообщает. GuiService при 125%
+-- отдаёт 1536x806 -- тот же логический размер минус верхняя панель.
+--
+-- Зато его видно по мыши. GetMouseLocation отдаёт ДРОБНЫЕ координаты (замерено:
+-- 268.800018, 330.399994 -- кратны 0.8, то есть 1/1.25): положение мыши всегда
+-- соответствует целому физическому пикселю. Значит наименьший ненулевой сдвиг
+-- между двумя её положениями и есть размер физического пикселя в логических.
+--
+-- Меряем по ходу дела. До первого замера считаем шаг равным единице -- при 100%
+-- это и есть точный ответ, а при дробном первое же движение мыши его уточняет.
+--
+-- Берём НЕ минимум сдвигов, а их НОД, и это принципиально: минимум верен, лишь
+-- когда мышь хоть раз сдвинули ровно на пиксель, а если ею возят рывками по
+-- три-четыре, минимум так и застрянет на трёх. НОД же сходится к истинному
+-- шагу с любых движений -- достаточно двух сдвигов во взаимно простое число
+-- пикселей, а таких пар среди случайных движений подавляющее большинство.
+
+local UserInputService = game:GetService("UserInputService")
+
+local THEME = NierUI.Theme
+local U = NierUI.util
+local Window = NierUI.WindowClass
+
+-- Поверх всего своего: у окна ZIndexBehavior = Sibling, число сравнивается
+-- глобально, и всплывающие окна с их сотнями сюда не дотягиваются.
+local Z = 1000000
+
+--== размеры, В ФИЗИЧЕСКИХ ПИКСЕЛЯХ ==========================================
+
+local MARGIN = 1         -- оправа
+local THICK = 2          -- толщина черты
+local ARM = 8            -- её длина
+local GAP = 4            -- от середины до черты
+local CORE = 2           -- сторона сердцевины
+
+-- Части указателя: прямоугольник ЧЕРТЫ относительно середины, оправа шире его
+-- на MARGIN со всех сторон. Отсюда просвет между оправой черты и оправой
+-- сердцевины: GAP - MARGIN - (CORE/2 + MARGIN) = 1 пиксель. Слипаться им
+-- нельзя -- проверено увеличенным снимком, всё светлое тогда сливается в один
+-- толстый крест.
+local PARTS = {
+    { x = -GAP - ARM, y = -THICK / 2, w = ARM, h = THICK },   -- слева
+    { x = GAP, y = -THICK / 2, w = ARM, h = THICK },          -- справа
+    { x = -THICK / 2, y = -GAP - ARM, w = THICK, h = ARM },   -- сверху
+    { x = -THICK / 2, y = GAP, w = THICK, h = ARM },          -- снизу
+    { x = -CORE / 2, y = -CORE / 2, w = CORE, h = CORE },     -- сердцевина
+}
+
+-- Размер физического пикселя в логических. Живёт на самой библиотеке, а не на
+-- окне: библиотека кешируется в окружении, поэтому замер делается один раз за
+-- сессию и переживает и пересоздание окна, и перезапуск скрипта. Единица --
+-- честное значение для масштаба 100%.
+NierUI.pixelStep = NierUI.pixelStep or 1
+
+--=============================================================================
+
+local function build(window)
+    -- Контейнер во весь экран: доли его детей считаются от размера экрана, и
+    -- никакой арифметики с верхней панелью не нужно -- GetMouseLocation живёт
+    -- в той же системе отсчёта.
+    local holder = U.new("Frame", {
+        BackgroundTransparency = 1, Active = false, Visible = false,
+        Size = UDim2.fromScale(1, 1), ZIndex = Z,
+    }, window.gui)
+
+    local parts = {}
+    for _, spec in ipairs(PARTS) do
+        -- Оправа. Active = false на всём: указатель лежит поверх меню и ловил
+        -- бы своими краями щелчки, предназначенные строке под ним.
+        local frame = U.new("Frame", {
+            BackgroundColor3 = THEME.Bg, BorderSizePixel = 0, Active = false,
+            ZIndex = Z,
+        }, holder)
+
+        -- Черта внутри оправы -- чистое отношение, масштаб ей не нужен.
+        local wTotal = spec.w + MARGIN * 2
+        local hTotal = spec.h + MARGIN * 2
+        U.new("Frame", {
+            BackgroundColor3 = THEME.Ink, BorderSizePixel = 0, Active = false,
+            Position = UDim2.fromScale(MARGIN / wTotal, MARGIN / hTotal),
+            Size = UDim2.fromScale(spec.w / wTotal, spec.h / hTotal),
+            ZIndex = Z + 1,
+        }, frame)
+
+        parts[#parts + 1] = {
+            frame = frame,
+            x = spec.x - MARGIN, y = spec.y - MARGIN,
+            w = wTotal, h = hTotal,
+        }
+    end
+
+    window.cursor = holder
+    window.cursorParts = parts
+    return holder
+end
+
+--=============================================================================
+
+function Window:ShowCursor()
+    if self.cursorOn then return end
+    -- Мыши может не быть вовсе: телефон, планшет, консоль. Указатель за пальцем
+    -- не ходит, а нарисованный посреди экрана крест только мешает.
+    if not UserInputService.MouseEnabled then return end
+    self.cursorOn = true
+
+    local holder = self.cursor or build(self)
+    local parts = self.cursorParts
+
+    local step = NierUI.pixelStep
+    local last = nil
+    local moves = 0
+
+    local function layout()
+        local size = holder.AbsoluteSize
+        if size.X <= 0 or size.Y <= 0 then return end
+        for _, p in ipairs(parts) do
+            p.frame.Size = UDim2.fromScale(
+                p.w * step / size.X, p.h * step / size.Y)
+        end
+    end
+
+    local function place(at)
+        local size = holder.AbsoluteSize
+        if size.X <= 0 or size.Y <= 0 then return end
+        for _, p in ipairs(parts) do
+            p.frame.Position = UDim2.fromScale(
+                (at.X + p.x * step) / size.X,
+                (at.Y + p.y * step) / size.Y)
+        end
+    end
+
+    -- Евклид с допуском. Сдвиги кратны истинному шагу, поэтому остаток сходится
+    -- к нему за считаные итерации; порог 0.05 гасит накопленную погрешность.
+    local function fold(a, b)
+        if b < 1e-4 then return a end
+        if a == nil then return b end
+        if a < b then a, b = b, a end
+        for _ = 1, 40 do
+            if b <= 0.05 then break end
+            a, b = b, a - math.floor(a / b + 1e-6) * b
+        end
+        return a
+    end
+
+    -- Евклид на float32 копит погрешность: замер дал 0.799591 вместо 0.8, и
+    -- края разъезжались на сотую пикселя. Но настоящий шаг -- всегда дробь с
+    -- небольшим знаменателем (125% -> 4/5, 150% -> 2/3, 175% -> 4/7, 200% ->
+    -- 1/2), поэтому подтягиваем измеренное к ближайшей такой дроби. Заодно это
+    -- якорь: подтянутое значение идёт обратно в накопитель и не даёт ему
+    -- уползать дальше.
+    local function snap(x)
+        local best, err = x, 0.01
+        for q = 1, 16 do
+            local p = math.floor(x * q + 0.5)
+            if p >= 1 then
+                local v, d = p / q, math.abs(p / q - x)
+                if d < err then best, err = v, d end
+            end
+        end
+        return best
+    end
+
+    -- ГРАНИЦЫ ДОВЕРИЯ.
+    --
+    -- Снизу 0.1 -- это масштаб 1000%, с запасом на телефоны с плотностью 3x и
+    -- 4x. Сверху 4 -- на случай, когда логический экран КРУПНЕЕ физического
+    -- (масштаб меньше 100%; через настройки Windows такого не выставить, но
+    -- драйверы и правка реестра позволяют).
+    --
+    -- Шаг больше логического пикселя принимаем только после восьми движений, и
+    -- это не перестраховка: НОД сходится СВЕРХУ, и на первых сдвигах он вполне
+    -- может оказаться равным трём. Приняв это сразу, мы бы на секунду раздули
+    -- указатель втрое. Значение меньше единицы такой опасности не несёт --
+    -- крупнее, чем при масштабе 100%, он от него не станет.
+    local acc = nil
+    local function observe(at)
+        if last then
+            moves = moves + 1
+            acc = fold(fold(acc, math.abs(at.X - last.X)), math.abs(at.Y - last.Y))
+            local trusted = acc and acc >= 0.1
+                and (acc <= 1 or (acc <= 4 and moves >= 8))
+            if trusted then
+                acc = snap(acc)
+                if math.abs(acc - step) > 1e-4 then
+                    step = acc
+                    NierUI.pixelStep = step
+                    layout()
+                end
+            end
+        end
+        last = at
+    end
+
+    layout()
+    place(UserInputService:GetMouseLocation())
+    holder.Visible = true
+
+    self.cursorConns = {
+        -- Движение -- СОБЫТИЕ, а не кадр: мышь стоит, и не тратится ничего.
+        -- Постоянных потоков в библиотеке по-прежнему нет ни одного.
+        UserInputService.InputChanged:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+            local at = UserInputService:GetMouseLocation()
+            observe(at)
+            place(at)
+        end),
+
+        -- Размер экрана меняется чаще, чем кажется: окно тянут за угол,
+        -- включают полноэкранный режим, поворачивают планшет, перетаскивают
+        -- окно на монитор с другой плотностью. Положение считается от текущего
+        -- размера при каждом движении, а вот РАЗМЕРЫ частей заданы долей и
+        -- сами не пересчитаются.
+        --
+        -- Замер при этом сбрасываем: у другого монитора другой физический
+        -- пиксель, а НОД умеет только уменьшаться и сам бы туда не вернулся.
+        holder:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+            acc, last, moves = nil, nil, 0
+            step = 1
+            NierUI.pixelStep = 1
+            layout()
+            place(UserInputService:GetMouseLocation())
+        end),
+    }
+end
+
+function Window:HideCursor()
+    if not self.cursorOn then return end
+    self.cursorOn = false
+
+    for _, conn in ipairs(self.cursorConns or {}) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self.cursorConns = false
+
+    if self.cursor then self.cursor.Visible = false end
+end
+
+end)(NierUI)
+
+--============================ NierUI/Capture.luau ============================
+;(function(NierUI)
+--!nocheck
+--=============================================================================
+-- Capture -- меню забирает ввод себе, пока открыто
+--=============================================================================
+--
+-- Открыл меню посреди боя -- курсор появился, щелчки идут в меню, а не в игру.
+-- Закрыл -- всё вернулось ровно как было.
+--
+-- Выключается опцией окна: NierUI:Window({ CaptureInput = false }).
+--
+--
+-- ПОЧЕМУ НЕ ПОКАДРОВОЕ УДЕРЖАНИЕ
+--
+-- Игра выставляет режим мыши своим кодом и делает это регулярно, поэтому
+-- однократной записи мало. Напрашивается держать значение каждый кадр -- и это
+-- был бы первый постоянный поток в библиотеке, ради того, что меняется раз в
+-- десять минут.
+--
+-- Вместо этого подписка на изменение самого свойства: игра его переписала --
+-- мы вернули. Пока никто не спорит, не тратится ничего.
+--
+-- Своя запись отличается флагом: без него мы отвечали бы на собственное
+-- изменение и ушли бы в бесконечную взаимную правку.
+--
+--
+-- ДЕРЖИМ ТОЛЬКО РЕЖИМ МЫШИ
+--
+-- Раньше здесь удерживался ещё и MouseIconEnabled -- и это не работало.
+-- Проверено вживую: щелчки в меню доходят, курсора нет. Игра прячет указатель
+-- не одним этим свойством, а проигранный спор выглядит как работающее меню,
+-- по которому непонятно куда нажимать.
+--
+-- Поэтому системный указатель теперь ГАСИТСЯ, а вместо него рисуется свой
+-- (см. Cursor). Режим мыши держать по-прежнему необходимо: в LockCenter
+-- указатель прибит к середине экрана и ни до одной строки не доедет.
+--
+--
+-- ЧТО ИМЕННО ПОГЛОЩАЕТСЯ
+--
+-- Кнопки мыши и клавиши движения -- то, чем в бою стреляют и ездят. Не вся
+-- клавиатура: под перехватом остались бы и наши собственные поля ввода, и
+-- набрать в них что-либо стало бы нельзя.
+--
+-- Приоритет заведомо выше игровых: у Roblox штатные привязки живут около
+-- двух тысяч, берём с запасом.
+
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local U = NierUI.util
+local Window = NierUI.WindowClass
+
+local PRIORITY = 5000
+
+local SINK = {
+    Enum.UserInputType.MouseButton1,
+    Enum.UserInputType.MouseButton2,
+    Enum.UserInputType.MouseButton3,
+    Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
+    Enum.KeyCode.Q, Enum.KeyCode.E,
+    Enum.KeyCode.Space, Enum.KeyCode.LeftShift, Enum.KeyCode.LeftControl,
+}
+
+--=============================================================================
+
+function Window:StartCapture()
+    if self.captured then return end
+
+    -- БЕЗ МЫШИ ПЕРЕХВАТЫВАТЬ НЕЧЕГО. На телефоне, планшете и консоли касание и
+    -- так достаётся тому, по чему нажали, а поглощать WASD и кнопки мыши там
+    -- бессмысленно: экранные органы управления -- это тот же интерфейс, и в
+    -- ContextActionService они не приходят.
+    --
+    -- Хуже того, режим мыши там трогать нельзя вовсе: на консоли Default
+    -- отвяжет прицел от стика.
+    if not UserInputService.MouseEnabled then return end
+
+    self.captured = true
+
+    -- Запоминаем ровно то, что было: вернуть надо не «как принято», а как
+    -- стояло у этого человека в этой игре.
+    self.capturePrev = {
+        behavior = UserInputService.MouseBehavior,
+        icon = UserInputService.MouseIconEnabled,
+    }
+
+    -- Свой указатель -- значит системный лишний: два курсора хуже, чем ни
+    -- одного. Отказались от своего -- пробуем показать системный, больше нам
+    -- предложить нечего.
+    local icon = not self.drawCursor
+
+    local ours = false
+    local function assert()
+        if ours then return end
+        ours = true
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = icon
+        ours = false
+    end
+    assert()
+
+    self.captureConns = {
+        UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
+            if self.captured then assert() end
+        end),
+        UserInputService:GetPropertyChangedSignal("MouseIconEnabled"):Connect(function()
+            if self.captured then assert() end
+        end),
+    }
+
+    if self.drawCursor then self:ShowCursor() end
+
+    self.captureAction = "NierUI_" .. U.randomName()
+    ContextActionService:BindActionAtPriority(
+        self.captureAction,
+        function() return Enum.ContextActionResult.Sink end,
+        false, PRIORITY, table.unpack(SINK))
+end
+
+function Window:StopCapture()
+    if not self.captured then return end
+    self.captured = false
+
+    self:HideCursor()
+
+    for _, conn in ipairs(self.captureConns or {}) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self.captureConns = false
+
+    if self.captureAction then
+        pcall(function() ContextActionService:UnbindAction(self.captureAction) end)
+        self.captureAction = false
+    end
+
+    local prev = self.capturePrev
+    if prev then
+        UserInputService.MouseBehavior = prev.behavior
+        UserInputService.MouseIconEnabled = prev.icon
+        self.capturePrev = false
+    end
+end
+
+end)(NierUI)
+
 --============================ NierUI/Config.luau ============================
 ;(function(NierUI)
 --!nocheck
@@ -2834,6 +3328,7 @@ end)(NierUI)
 -- настройки под ней.
 
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 local THEME = NierUI.Theme
 local U = NierUI.util
@@ -2850,12 +3345,27 @@ function Window:Popup(opts)
     local width = opts.Width or 200
     local height = opts.Height or 120
 
+    -- ДВЕ СИСТЕМЫ ОТСЧЁТА -- ПОПРАВКА ЗДЕСЬ, А НЕ У ВЫЗЫВАЮЩИХ.
+    --
+    -- X и Y сюда приходят из AbsolutePosition якоря -- иначе и неоткуда, у
+    -- строки другого адреса нет. Но у окна IgnoreGuiInset = true, и смещение в
+    -- Position считается от НАСТОЯЩЕГО верха экрана, тогда как AbsolutePosition
+    -- сообщается от границы под верхней панелью.
+    --
+    -- Замерено: панель 58 пикселей, и ровно на столько всплывающие окна вставали
+    -- выше своей строки. Настройки тумблера ПОЛЁТ открывались над ним, а не
+    -- рядом -- достаточно близко, чтобы полгода не вызывать вопросов.
+    --
+    -- Поправку делаем в одном месте: вызывающих у Popup много, и повторять её в
+    -- каждом значит однажды забыть.
+    local inset = GuiService:GetGuiInset()
+
     -- Держим окно в пределах экрана: открытое у нижнего края меню иначе
     -- уезжает за экран целиком.
     local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
         or Vector2.new(1920, 1080)
-    local x = math.clamp(opts.X or 0, 4, math.max(4, view.X - width - 4))
-    local y = math.clamp(opts.Y or 0, 4, math.max(4, view.Y - height - 4))
+    local x = math.clamp((opts.X or 0) + inset.X, 4, math.max(4, view.X - width - 4))
+    local y = math.clamp((opts.Y or 0) + inset.Y, 4, math.max(4, view.Y - height - 4))
 
     local layer = U.new("Frame", {
         BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
@@ -3091,6 +3601,15 @@ end)(NierUI)
 -- клавиши. Описывать тип вручную значило бы держать его в двух местах и
 -- однажды разойтись.
 --
+-- Исключение одно -- ползунок. По голому числу диапазон не угадать, поэтому
+-- ему нужна форма описания:
+--
+--     Settings = { ЗНАЧЕНИЕ = { Type = "Slider", Default = 1000,
+--                               Min = 1, Max = 999999, Step = 1 } }
+--
+-- В состоянии при этом лежит само число, а не описание: наружу и в профиль
+-- уходит значение.
+--
 -- Порядок строк -- по алфавиту ключей. Порядок обхода хеша в Lua не определён,
 -- и без сортировки настройки перемешивались бы при каждом открытии.
 
@@ -3106,6 +3625,13 @@ local WIDTH = 220
 -- и четыре пикселя расхождения существовали просто потому, что их никто не
 -- сверял.
 local TOP = THEME.PopupTitleHeight + 4
+
+-- Начальное значение настройки. Для описания ползунка это его Default, для
+-- всего остального -- само значение.
+function NierUI.settingDefault(value)
+    if type(value) == "table" and value.Type then return value.Default end
+    return value
+end
 
 -- window   -- окно, которому принадлежит всплывающее
 -- anchor   -- от какого элемента отсчитывать положение
@@ -3146,10 +3672,115 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
             ZIndex = z + 1,
         }, rowBtn)
 
-        local current = state[key]
-        if current == nil then current = spec[key] end
+        local descriptor = spec[key]
+        local isSlider = type(descriptor) == "table" and descriptor.Type == "Slider"
 
-        if typeof(current) == "Color3" then
+        local current = state[key]
+        if current == nil then current = NierUI.settingDefault(descriptor) end
+
+        if isSlider then
+            local min = descriptor.Min or 0
+            local max = descriptor.Max or 100
+            local stepSize = descriptor.Step or 1
+
+            local span = (max > min) and (max - min) or 1
+
+            local decimals = 0
+            if stepSize < 1 then
+                decimals = math.max(0, math.ceil(-math.log(stepSize, 10)))
+            end
+            local format = "%." .. decimals .. "f"
+            local roundTo = 10 ^ decimals
+
+            -- Строка тесная: название, дорожка и поле числа делят 220 пикселей.
+            -- Название поэтому обрезается, а не растягивается под остальными.
+            label.Size = UDim2.fromOffset(96, ROW)
+            label.TextTruncate = Enum.TextTruncate.AtEnd
+
+            local track = U.new("Frame", {
+                BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
+                BackgroundTransparency = 0.75, AnchorPoint = Vector2.new(0, 0.5),
+                Position = UDim2.new(0, 112, 0, math.floor(ROW / 2)),
+                Size = UDim2.fromOffset(50, 2), ZIndex = z + 1,
+            }, rowBtn)
+            local fill = U.new("Frame", {
+                BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
+                Size = UDim2.fromScale(0, 1),
+            }, track)
+
+            local box = U.new("TextBox", {
+                BackgroundTransparency = 1, Font = THEME.Font,
+                Text = "", TextColor3 = THEME.InkSoft, TextSize = THEME.TextSize,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                TextEditable = true, ClearTextOnFocus = false,
+                AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -10, 0, 0),
+                Size = UDim2.fromOffset(0, ROW),
+                AutomaticSize = Enum.AutomaticSize.X, ZIndex = z + 1,
+            }, rowBtn)
+            U.new("UISizeConstraint", { MinSize = Vector2.new(22, ROW) }, box)
+
+            local editing = false
+
+            local function render()
+                local v = state[key] or min
+                if not editing then box.Text = format:format(v) end
+                fill.Size = UDim2.fromScale((v - min) / span, 1)
+            end
+
+            local function commit(v)
+                state[key] = math.clamp(
+                    math.floor(v * roundTo + 0.5) / roundTo, min, max)
+                render()
+                if onChange then pcall(onChange, key, state[key]) end
+            end
+
+            if state[key] == nil then state[key] = current or min end
+            render()
+
+            -- Тянуть можно только за дорожку. Строка занимает всю ширину окошка,
+            -- и нажатие по названию швырнуло бы значение в минимум.
+            local sliding = false
+            table.insert(conns, rowBtn.InputBegan:Connect(function(input)
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                local x = input.Position.X
+                if x < track.AbsolutePosition.X - 6
+                    or x > track.AbsolutePosition.X + track.AbsoluteSize.X + 6 then return end
+                sliding = true
+                commit(min + span * U.alongX(track, x))
+            end))
+            table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+                if not sliding then return end
+                if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+                commit(min + span * U.alongX(track, input.Position.X))
+            end))
+            table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    sliding = false
+                end
+            end))
+
+            -- Точное значение набирается руками: по дорожке в 56 пикселей в
+            -- диапазон до миллиона не попасть.
+            table.insert(conns, box.Focused:Connect(function() editing = true end))
+            table.insert(conns, box.FocusLost:Connect(function()
+                editing = false
+                local typed = tonumber(box.Text)
+                if typed then commit(typed) else render() end
+            end))
+
+            table.insert(conns, rowBtn.MouseEnter:Connect(function()
+                rowBtn.BackgroundTransparency = 0
+                label.TextColor3, box.TextColor3 = THEME.Bg, THEME.Bg
+                track.BackgroundColor3, fill.BackgroundColor3 = THEME.Bg, THEME.Bg
+            end))
+            table.insert(conns, rowBtn.MouseLeave:Connect(function()
+                rowBtn.BackgroundTransparency = 1
+                label.TextColor3, box.TextColor3 = THEME.Ink, THEME.InkSoft
+                track.BackgroundColor3, fill.BackgroundColor3 = THEME.Ink, THEME.Ink
+            end))
+
+        elseif typeof(current) == "Color3" then
             local swatch = U.new("Frame", {
                 BackgroundColor3 = current, BorderSizePixel = 0,
                 AnchorPoint = Vector2.new(1, 0.5),
@@ -3246,7 +3877,23 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 -- Escape отменяет назначение, а не назначает Escape.
                 if input.KeyCode ~= Enum.KeyCode.Escape then
                     state[key] = input.KeyCode
-                    if onChange then pcall(onChange, key, input.KeyCode) end
+
+                    -- НАЗНАЧЕНИЕ ВСТУПАЕТ В СИЛУ СО СЛЕДУЮЩЕГО КАДРА.
+                    --
+                    -- Нажатие, которым клавишу назначают, продолжает
+                    -- расходиться по остальным подписчикам этого же события.
+                    -- Сообщи мы о смене прямо здесь -- тот, кто на неё
+                    -- настраивает привязку, успел бы записать новую клавишу,
+                    -- и его собственный обработчик увидел бы совпадение с
+                    -- только что нажатой: фича включалась бы в момент бинда.
+                    --
+                    -- Полагаться на порядок обработчиков нельзя, он в Roblox
+                    -- не определён. Отложенный вызов снимает вопрос порядка
+                    -- целиком: к следующему кадру событие уже отработало.
+                    if onChange then
+                        local captured = input.KeyCode
+                        task.defer(function() pcall(onChange, key, captured) end)
+                    end
                 end
                 value.Text = (state[key] or spec[key]).Name
                 paint()
@@ -3329,7 +3976,9 @@ NierUI.widget("Toggle", function(tab, opts)
     local settings
     if opts.Settings then
         settings = {}
-        for key, default in pairs(opts.Settings) do settings[key] = default end
+        for key, default in pairs(opts.Settings) do
+            settings[key] = NierUI.settingDefault(default)
+        end
         rowApi.settings(tab.window, opts.Text or "", opts.Settings, settings, opts.OnSetting)
     end
 
@@ -3618,7 +4267,22 @@ NierUI.widget("Slider", function(tab, opts)
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
-        Set = function(_, v, silent) set(v, silent) end,
+        -- Set НЕ ПРИТЯГИВАЕТ К ШАГУ, как и набор руками.
+        --
+        -- Шаг существует ради перетаскивания: по стопиксельной дорожке точнее
+        -- всё равно не попасть. Но программная установка и загрузка профиля --
+        -- не перетаскивание, и притягивание там теряет данные: при шаге 1000
+        -- сохранённые 65 возвращались как 0, а 500 -- как 1000. Значение,
+        -- которое положили в профиль, обязано вернуться тем же.
+        Set = function(_, v, silent)
+            if silent then
+                local clamped = math.clamp(tonumber(v) or min, min, max)
+                current = math.floor(clamped * roundTo + 0.5) / roundTo
+                render()
+                return
+            end
+            setTyped(tonumber(v) or min)
+        end,
         Get = function(_) return current end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)
@@ -3768,8 +4432,10 @@ local function build(tab, opts, multi)
             store = {}
             settings[entry.key] = store
         end
+        -- В состоянии лежит ЗНАЧЕНИЕ, а не описание: у ползунка описание
+        -- содержит диапазон, а наружу и в профиль должно уходить число.
         for key, default in pairs(spec) do
-            if store[key] == nil then store[key] = default end
+            if store[key] == nil then store[key] = NierUI.settingDefault(default) end
         end
         return spec, store
     end
@@ -4286,7 +4952,16 @@ NierUI.widget("Keybind", function(tab, opts)
             -- Escape отменяет назначение, а не назначает Escape.
             if input.KeyCode ~= Enum.KeyCode.Escape then
                 key = input.KeyCode
-                if opts.Changed then pcall(opts.Changed, key) end
+                -- Со следующего кадра, а не сразу: нажатие, которым клавишу
+                -- назначают, ещё расходится по остальным подписчикам этого же
+                -- события, и настроенная прямо здесь привязка сработала бы от
+                -- него же. Порядок обработчиков в Roblox не определён, поэтому
+                -- вопрос снимается отложенным вызовом, а не расстановкой
+                -- подписок.
+                if opts.Changed then
+                    local captured = key
+                    task.defer(function() pcall(opts.Changed, captured) end)
+                end
             end
             render()
             return
@@ -4299,7 +4974,15 @@ NierUI.widget("Keybind", function(tab, opts)
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
-        Set = function(_, k) key = k render() end,
+        -- Set ВЫЗЫВАЕТ Changed, иначе загрузка профиля показывала бы новую
+        -- клавишу, а работала бы старая: тот, кто на Changed настраивает
+        -- реальную привязку, о смене просто не узнал бы.
+        Set = function(_, k, silent)
+            key = k
+            render()
+            if silent or not opts.Changed then return end
+            pcall(opts.Changed, key)
+        end,
         Get = function(_) return key end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)
@@ -5071,7 +5754,18 @@ system:Button({
 })
 
 system:Divider()
-system:Label("Delete toggles this window. Drag it by the header.")
+
+-- Клавиша открытия -- обычная привязка: меняется на лету и сохраняется в
+-- профиль наравне со всем остальным.
+system:Keybind({
+    Text = "MENU KEY",
+    Desc = "Rebind the key that opens this window.",
+    Default = win:GetToggleKey(),
+    Flag = "menuKey",
+    Changed = function(key) win:SetToggleKey(key) end,
+})
+
+system:Label("Drag the window by its header.")
 
 --== секции, колонки и остальные элементы ====================================
 

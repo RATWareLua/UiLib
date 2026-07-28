@@ -36,7 +36,16 @@ NierUI.widget("Keybind", function(tab, opts)
             -- Escape отменяет назначение, а не назначает Escape.
             if input.KeyCode ~= Enum.KeyCode.Escape then
                 key = input.KeyCode
-                if opts.Changed then pcall(opts.Changed, key) end
+                -- Со следующего кадра, а не сразу: нажатие, которым клавишу
+                -- назначают, ещё расходится по остальным подписчикам этого же
+                -- события, и настроенная прямо здесь привязка сработала бы от
+                -- него же. Порядок обработчиков в Roblox не определён, поэтому
+                -- вопрос снимается отложенным вызовом, а не расстановкой
+                -- подписок.
+                if opts.Changed then
+                    local captured = key
+                    task.defer(function() pcall(opts.Changed, captured) end)
+                end
             end
             render()
             return
@@ -49,7 +58,15 @@ NierUI.widget("Keybind", function(tab, opts)
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
-        Set = function(_, k) key = k render() end,
+        -- Set ВЫЗЫВАЕТ Changed, иначе загрузка профиля показывала бы новую
+        -- клавишу, а работала бы старая: тот, кто на Changed настраивает
+        -- реальную привязку, о смене просто не узнал бы.
+        Set = function(_, k, silent)
+            key = k
+            render()
+            if silent or not opts.Changed then return end
+            pcall(opts.Changed, key)
+        end,
         Get = function(_) return key end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)
