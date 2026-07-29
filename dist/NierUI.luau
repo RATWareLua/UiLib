@@ -4802,20 +4802,40 @@ local function build(tab, opts, multi)
         IsEnabled = function(_) return rowApi.isEnabled() end,
     }
 
+    -- SET ОБЯЗАН СООБЩИТЬ О СМЕНЕ, как это делают все остальные элементы.
+    --
+    -- Список был единственным, кто молчал, и стоило это вот чего: загрузка
+    -- профиля расставляла галочки, а тот, кто на них подписан, о смене не
+    -- узнавал. В меню отмечено, на деле выключено -- расхождение, которое
+    -- глазами не поймать, потому что интерфейс показывает правду о себе и
+    -- неправду о происходящем.
+    --
+    -- Тишина по-прежнему доступна вторым аргументом -- ею пользуются, когда
+    -- значение ставят изнутри и обработчик уже отработал.
+    local function notify(value, silent)
+        if silent or not opts.Callback then return end
+        local ok, err = pcall(opts.Callback, value)
+        if not ok then warn("[NierUI] " .. tostring(opts.Text) .. ": " .. tostring(err)) end
+    end
+
     if multi then
         api.Get = function(_) return picked() end
-        api.Set = function(_, values)
+        api.Set = function(_, values, silent)
             table.clear(chosen)
             for _, v in ipairs(values or {}) do chosen[v] = true end
             render()
+            -- Наружу отдаём picked(), а не values: он идёт в порядке пунктов и
+            -- не содержит ключей, которых в наборе нет.
+            notify(picked(), silent)
         end
         api.Has = function(_, key) return chosen[key] == true end
     else
         api.Get = function(_) return picked()[1] end
-        api.Set = function(_, v)
+        api.Set = function(_, v, silent)
             table.clear(chosen)
             if v ~= nil then chosen[v] = true end
             render()
+            notify(v, silent)
         end
     end
 
