@@ -143,7 +143,9 @@ function Window:Notify(opts)
         Size = UDim2.new(1, 0, 0, BAR), ZIndex = 202,
     }, card)
 
-    local entry = { card = card, x = 0 }
+    -- abandon заполняется ниже: это способ для ClearNotifications погасить
+    -- карточку изнутри, не разбираясь в её внутренностях.
+    local entry = { card = card, x = 0, abandon = false }
     table.insert(self.notifications, entry)
 
     -- Высота карточки -- по фактической высоте текста. Пересчитывается по
@@ -166,11 +168,23 @@ function Window:Notify(opts)
 
     local gone = false
 
-    local function destroy()
+    -- Бросить карточку: пометить ушедшей и снять подписку на высоту.
+    --
+    -- Подписку здесь снимать ОБЯЗАТЕЛЬНО. ClearNotifications уничтожает карточку
+    -- сам, мимо destroy, и раньше взводил только пометку -- sizeConn оставался
+    -- висеть на теле уничтоженной карточки. Одна забытая подписка на каждое
+    -- показанное сообщение, а сообщений за сеанс сотни.
+    local function abandon()
+        gone = true
         if sizeConn then
             sizeConn:Disconnect()
             sizeConn = nil
         end
+    end
+    entry.abandon = abandon
+
+    local function destroy()
+        abandon()
         for i = #self.notifications, 1, -1 do
             if self.notifications[i] == entry then table.remove(self.notifications, i) end
         end
@@ -214,9 +228,18 @@ end
 
 -- Снять все разом. Нужно выгрузке окна: карточки висят на ScreenGui, и без
 -- этого отложенные задержки достались бы уже уничтоженным объектам.
+--
+-- Бросаем каждую явно, её же собственным механизмом. Карточка уничтожается
+-- здесь, а отложенный dismiss на неё всё равно придёт -- и без пометки пошёл бы
+-- уводить и хоронить то, чего уже нет. До сих пор его удерживала только
+-- проверка card.Parent внутри, то есть случайность, а не намерение.
+--
+-- Через abandon, а не пометкой руками: вместе с пометкой снимается и подписка на
+-- высоту карточки, а её здесь снять больше некому -- destroy отсюда не зовётся.
 function Window:ClearNotifications()
     for i = #self.notifications, 1, -1 do
         local entry = self.notifications[i]
+        if entry.abandon then entry.abandon() end
         if entry.card.Parent then entry.card:Destroy() end
         table.remove(self.notifications, i)
     end

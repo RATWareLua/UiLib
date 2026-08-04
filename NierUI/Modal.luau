@@ -32,7 +32,13 @@ function Window:Confirm(opts)
     local text = tostring(opts.Text or "")
     -- Высоту прикидываем по длине текста: точную не узнать до отрисовки, а
     -- окно уже должно встать по центру.
-    local lines = math.max(1, math.ceil(#text / 42))
+    --
+    -- В СИМВОЛАХ, А НЕ В БАЙТАХ. Здесь стояло #text, и русский вопрос давал
+    -- вдвое больше строк, чем есть: кириллическая буква в UTF-8 занимает два
+    -- байта. Окно выходило заметно выше нужного, с пустотой между текстом и
+    -- кнопками -- а спрашивает библиотека как раз по-русски, своим же «СНЕСТИ
+    -- ПРИВЯЗКУ».
+    local lines = math.max(1, math.ceil((U.textLength(text) or #text) / 42))
     local height = THEME.PopupTitleHeight + 12 + lines * 16 + 12 + BUTTON_H + 12
 
     local panel, close, conns, z = self:Popup({

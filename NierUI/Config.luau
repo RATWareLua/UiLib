@@ -28,9 +28,13 @@
 --
 -- Поэтому каждое непростое значение заворачивается в пометку типа:
 --     Color3        -> { __t = "c", v = "#RRGGBB" }
---     EnumItem      -> { __t = "k", v = "LeftShift" }
+--     EnumItem      -> { __t = "k", e = "KeyCode", v = "LeftShift" }
 -- Разворачивается обратно по той же пометке. Обычные таблицы (набор
 -- множественного выбора, настройки пунктов) проходят рекурсией как есть.
+--
+-- У EnumItem пишется и САМО ПЕРЕЧИСЛЕНИЕ: без него разбор был зашит на
+-- Enum.KeyCode, и любой другой EnumItem возвращался чужим или никаким. Записи
+-- без поля e -- профили прежнего формата, там это всегда клавиша.
 --
 --
 -- ЗАГРУЗКА ЗОВЁТ ОБРАТНЫЕ ВЫЗОВЫ, И ЭТО НАМЕРЕННО
@@ -88,17 +92,71 @@ end
 -- Кодек
 --=============================================================================
 
+--=============================================================================
+-- ЧИСЛОВОЙ КЛЮЧ JSON НЕ ПЕРЕЖИВАЕТ, И ЭТО НЕ МЕЛОЧЬ
+--=============================================================================
+--
+-- В JSON ключ объекта -- всегда строка. Таблица { [12345] = {...} } уходит как
+-- {"12345": {...}} и возвращается со СТРОКОВЫМ ключом. Дальше SetSetting ищет
+-- settings[12345], не находит settings["12345"] и молча выходит.
+--
+-- Молча -- потому что настройки применяются через pcall и отсутствие ключа
+-- ошибкой не считается. Внешне это выглядело так: белый список сохраняется,
+-- загружается, отметки на месте, а цвета у пунктов сброшены на умолчания.
+--
+-- Задевало это ровно ту форму, которую README рекомендует как основную там, где
+-- подписи могут совпадать: { Text = "Игрок", Key = 12345 }.
+--
+-- Массивы (набор множественного выбора) при этом обязаны остаться массивами --
+-- у них ключи 1..n и JSON их не портит. Поэтому разделяем: массив идёт как
+-- массив, чисто строковый хеш -- как объект, а хеш с любым другим ключом
+-- пишется парами, где ключ проходит через тот же кодек, что и значение.
+
+local function isArray(t)
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count == #t
+end
+
 local function encode(value)
     local kind = typeof(value)
 
     if kind == "Color3" then
         return { __t = "c", v = U.hex(value) }
     elseif kind == "EnumItem" then
-        return { __t = "k", v = value.Name }
+        -- ИМЯ ПЕРЕЧИСЛЕНИЯ ПИШЕТСЯ РЯДОМ СО ЗНАЧЕНИЕМ.
+        --
+        -- Раньше писалось только имя элемента, а разбор шёл всегда через
+        -- Enum.KeyCode -- в кодек была зашита догадка, что EnumItem бывает
+        -- только клавишей. Догадка неверная: Settings выводит контрол из типа
+        -- значения, и туда кладут что угодно. Enum.UserInputType.MouseButton2
+        -- возвращался из профиля как Enum.KeyCode.MouseButton2, то есть nil, и
+        -- настройка молча пропадала -- pcall в apply отсутствие ключа ошибкой
+        -- не считает.
+        return { __t = "k", e = tostring(value.EnumType), v = value.Name }
     elseif kind == "table" then
-        local out = {}
-        for k, v in pairs(value) do out[k] = encode(v) end
-        return out
+        if isArray(value) then
+            local out = {}
+            for index, v in ipairs(value) do out[index] = encode(v) end
+            return out
+        end
+
+        local plain = true
+        for k in pairs(value) do
+            if type(k) ~= "string" then plain = false break end
+        end
+
+        if plain then
+            local out = {}
+            for k, v in pairs(value) do out[k] = encode(v) end
+            return out
+        end
+
+        local entries = {}
+        for k, v in pairs(value) do
+            entries[#entries + 1] = { k = encode(k), v = encode(v) }
+        end
+        return { __t = "m", v = entries }
     end
 
     return value
@@ -112,9 +170,24 @@ local function decode(value)
     end
 
     if value.__t == "k" then
-        -- Клавиша могла исчезнуть между версиями движка -- pcall, а не вера.
-        local ok, key = pcall(function() return Enum.KeyCode[value.v] end)
-        return ok and key or nil
+        -- Профили СТАРОГО ФОРМАТА имени перечисления не несут. Тогда в этой
+        -- пометке могла лежать только клавиша -- ею и разбираем, иначе всё
+        -- сохранённое до этой правки перестало бы читаться.
+        local kind = value.e or "KeyCode"
+        -- Элемент мог исчезнуть между версиями движка -- pcall, а не вера.
+        local ok, item = pcall(function() return Enum[kind][value.v] end)
+        return ok and item or nil
+    end
+
+    -- Хеш с нестроковыми ключами: разворачиваем пары обратно. Ключ проходит
+    -- через тот же кодек -- им может быть не только число.
+    if value.__t == "m" then
+        local out = {}
+        for _, pair in ipairs(value.v or {}) do
+            local k = decode(pair.k)
+            if k ~= nil then out[k] = decode(pair.v) end
+        end
+        return out
     end
 
     local out = {}
@@ -152,6 +225,42 @@ local function collect(window)
                 end
             end
 
+            -- ПРИВЯЗКИ ЕДУТ ВМЕСТЕ СО СТРОКОЙ, А НЕ ОТДЕЛЬНЫМИ ФЛАГАМИ.
+            --
+            -- Клавиша, режим и подпись -- настройки ОДНОГО пункта меню, ровно
+            -- как цвет и число в settings. Заведи мы им свои флаги, пришлось бы
+            -- выдумывать каждому имя и следить, чтобы оно не столкнулось с чужим.
+            --
+            -- МАССИВОМ, ПО ПОРЯДКУ ОБЪЯВЛЕНИЯ: у строки бывает рубильник и
+            -- сколько угодно взаимодействий, а имя есть не у каждого. Цена
+            -- честная: вставил новую привязку в СЕРЕДИНУ списка -- сохранённые
+            -- клавиши сместятся на соседей. Дописывать в конец безопасно.
+            --
+            -- Собственное состояние взаимодействия сюда НЕ идёт: «летим прямо
+            -- сейчас» -- это про сеанс, а не настройка. Поднимать его из профиля
+            -- значило бы взлетать при запуске скрипта.
+            --
+            -- Подпись пишется только СВОЯ, данная человеком: скриптерская
+            -- приедет из кода, и притом свежая. Сохрани мы её, переименование в
+            -- коде не доходило бы до тех, кто уже сохранил профиль.
+            if handle.binds and #handle.binds > 0 then
+                local list = {}
+                for index, bind in ipairs(handle.binds) do
+                    list[index] = {
+                        key = bind:Key(),
+                        kind = bind:Kind(),
+                        title = bind.titled or nil,
+                        -- false пишем явно: nil означал бы «не сохраняли», а
+                        -- скрытая привязка обязана вернуться скрытой.
+                        shown = bind:Shown(),
+                        -- Создал её человек в менеджере -- она его, и переживать
+                        -- перезапуск обязана даже без клавиши.
+                        made = bind:Made(),
+                    }
+                end
+                entry.binds = encode(list)
+            end
+
             data[flag] = entry
         end
     end
@@ -177,6 +286,33 @@ local function apply(window, data)
                     for key, fields in pairs(map) do
                         for name, v in pairs(fields) do
                             pcall(handle.SetSetting, handle, key, name, v)
+                        end
+                    end
+                end
+            end
+
+            -- Привязки восстанавливаются ДО значения: сперва клавиши и режимы,
+            -- потом уже «включено или нет». Обратный порядок закрыл бы ворота
+            -- по ещё не восстановленным привязкам.
+            if entry.binds and handle.binds then
+                local saved = decode(entry.binds)
+                if type(saved) == "table" then
+                    for index, bind in ipairs(handle.binds) do
+                        local one = saved[index]
+                        if type(one) == "table" then
+                            pcall(bind.SetKey, bind, one.key)
+                            if one.kind and one.kind ~= "action" then
+                                pcall(bind.SetKind, bind, one.kind)
+                            end
+                            pcall(bind.SetTitle, bind, one.title)
+                            if one.shown ~= nil then
+                                pcall(bind.SetShown, bind, one.shown)
+                            end
+                            -- ПОСЛЕ клавиши: SetKey сам помечает привязку
+                            -- созданной, и порядок наоборот терял бы снятие.
+                            if one.made ~= nil then
+                                pcall(bind.SetMade, bind, one.made)
+                            end
                         end
                     end
                 end
@@ -233,6 +369,86 @@ function Window:Load(profile)
 
     local applied, missing = apply(self, data)
     return true, applied, missing
+end
+
+--=============================================================================
+-- МАСТЕР-ПРОФИЛЬ
+--=============================================================================
+--
+--     win:SetMaster("pvp")     назначить: грузится сам при каждом запуске
+--     win:GetMaster()          какой назначен
+--     win:SetMaster(false)     снять назначение
+--
+-- Имя лежит в отдельном файле рядом с профилями, а не внутри одного из них:
+-- профиль -- это набор значений, и «какой из них главный» ему не принадлежит.
+-- Положи мы указатель внутрь, он копировался бы вместе с профилем и назначал
+-- сам себя при каждом копировании.
+--
+-- ЗАГРУЗКА ОТЛОЖЕНА НА КАДР, И ЭТО ВЫНУЖДЕННО. Окно возвращается пустым --
+-- вкладки и виджеты вызывающий добавляет ПОСЛЕ. Загрузи мы профиль сразу, в
+-- реестре не было бы ни одного флага и применять было бы нечего. task.defer
+-- ждёт, пока вызывающий закончит постройку, и делает это без опроса и таймера.
+--
+-- Это не поток: одна отложенная задача, которая один раз отрабатывает и всё.
+
+local MASTER = "master.txt"
+
+local function masterPath(window)
+    return folderOf(window) .. "/" .. MASTER
+end
+
+function Window:GetMaster()
+    if not self.configFolder then return nil end
+    if type(readfile) ~= "function" then return nil end
+
+    local path = masterPath(self)
+    if type(isfile) == "function" and not isfile(path) then return nil end
+
+    local ok, name = pcall(readfile, path)
+    if not ok then return nil end
+    name = tostring(name):gsub("%s+$", "")
+    return name ~= "" and name or nil
+end
+
+function Window:SetMaster(profile)
+    if not canWrite() then return false, "исполнитель не умеет писать файлы" end
+
+    ensureFolder(ROOT)
+    ensureFolder(folderOf(self))
+
+    if not profile then
+        if type(delfile) == "function" then pcall(delfile, masterPath(self)) end
+        return true
+    end
+
+    local ok, err = pcall(writefile, masterPath(self), tostring(profile))
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+-- Зовётся окном при создании. Молчит, если папка не задана или мастера нет:
+-- отсутствие мастер-профиля -- обычное дело, а не ошибка.
+function Window:LoadMaster()
+    if not self.configFolder then return false end
+
+    if not self.autoMaster then return false end
+
+    -- ПРОВЕРКА НА ЛОЖНОСТЬ, А НЕ НА nil.
+    --
+    -- В состоянии окна «не задан» хранится как false -- там все отсутствующие
+    -- поля false, чтобы диспетчер контейнера отличал их от опечаток. Сравнение
+    -- с nil здесь не срабатывало никогда, и имя из файла не читалось вовсе:
+    -- мастер молча не поднимался, а выглядело это как «профиль пустой».
+    local name = self.master
+    if not name then
+        local ok, found = pcall(self.GetMaster, self)
+        name = ok and found or nil
+    end
+    if not name then return false end
+
+    local ok, applied, missing = pcall(self.Load, self, name)
+    if not ok then return false end
+    return applied, missing
 end
 
 function Window:Profiles()

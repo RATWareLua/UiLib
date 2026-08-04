@@ -26,6 +26,21 @@ NierUI.widget("Radio", function(tab, opts)
     local current = opts.Default
     if current == nil then current = options[1] end
 
+    -- ПРАВОЙ КНОПКИ У НЕГО НЕТ, И ЭТО НЕ УПУЩЕНИЕ.
+    --
+    -- Radio -- не строка, а НЕСКОЛЬКО строк плюс подпись над ними, и вешать
+    -- меню не на что: на подпись -- она не строка вовсе, на каждый вариант --
+    -- получится по меню на вариант, чего никто не просил. Сказать об этом
+    -- вслух надо потому, что молча поля Menu и Settings просто не делали
+    -- ничего, а понять это можно было только по тому, что ничего не
+    -- происходит. Нужны настройки при выборе из немногих -- Segmented: он
+    -- занимает ровно одну строку, и правая кнопка у него своя.
+    if opts.Menu or opts.Settings then
+        error(("[NierUI] «%s»: у Radio нет правой кнопки -- он занимает "
+            .. "несколько строк, и вешать меню не на что. Возьмите Segmented "
+            .. "или Dropdown."):format(tostring(opts.Text or "?")), 0)
+    end
+
     if opts.Text then tab:Label({ Text = opts.Text }) end
 
     local rows, painters = {}, {}
@@ -44,11 +59,11 @@ NierUI.widget("Radio", function(tab, opts)
             value.Text = current == option and "[ o ]" or "[   ]"
         end
 
-        table.insert(tab.window.conns, row.MouseButton1Click:Connect(rowApi.gate(function()
+        NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
             if current == option then return end
             current = option
             render()
-        end)))
+        end))
 
         rows[#rows + 1] = rowApi
     end
@@ -78,7 +93,7 @@ end)
 -- сегменты остаются одинаковыми и в узкой колонке.
 
 NierUI.widget("Segmented", function(tab, opts)
-    local row, _, value, _, _, rowApi = NierUI.makeRow(tab, opts.Text, opts.Desc)
+    local row, _, value, _, _, rowApi = NierUI.makeRow(tab, opts.Text, opts.Desc, nil, opts)
     value.Text = ""
 
     local options = opts.Options or {}
@@ -143,11 +158,11 @@ NierUI.widget("Segmented", function(tab, opts)
             line.Transparency = on and 1 or 0.5
         end
 
-        table.insert(tab.window.conns, segment.MouseButton1Click:Connect(rowApi.gate(function()
+        NierUI.connect(tab, segment.MouseButton1Click, rowApi.gate(function()
             if current == option then return end
             current = option
             render()
-        end)))
+        end))
     end
 
     render(true)

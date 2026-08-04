@@ -20,6 +20,10 @@ local win = NierUI:Window({
     ConfigFolder = "nierui-demo",
 })
 ENV.__nierDemo = win
+-- Сама библиотека -- наружу: витрина для того и есть, чтобы её примитивы можно
+-- было потрогать, а проверки -- позвать NierUI.widget и убедиться, что пример
+-- «свой виджет» из README действительно собирается.
+ENV.__nierUI = NierUI
 
 --== вкладка с переключателями ===============================================
 
@@ -164,9 +168,14 @@ visuals:Dropdown({
         print("[demo] outline setting:", option, key, value)
     end,
 })
+-- PANIC -- РАБОЧАЯ ПРИВЯЗКА, назначенная прямо здесь, а не через менеджер.
+--
+-- Она и есть проверка главного свойства: привязка попадает в менеджер и в
+-- список САМА, независимо от того, где её объявили. Автору скрипта не нужно
+-- ничего регистрировать -- достаточно поставить Keybind.
 visuals:Keybind({
     Text = "PANIC",
-    Desc = "Press to unload everything at once.",
+    Desc = "Bound right here, not in the manager -- and it shows up there anyway.",
     Default = Enum.KeyCode.G,
     Callback = function() print("[demo] panic!") end,
     Changed = function(key) print("[demo] rebound to", key.Name) end,
@@ -260,6 +269,36 @@ system:Button({
         })
     end,
 })
+-- МАСТЕР-ПРОФИЛЬ: назначенный поднимается сам при каждом запуске скрипта.
+-- Имя лежит в отдельном файле рядом с профилями, поэтому назначать можно прямо
+-- отсюда, не трогая код.
+local masterLabel = system:Label("MASTER: " .. (win:GetMaster() or "нет"))
+
+system:Button({
+    Text = "SET MASTER",
+    Desc = "The selected profile will load by itself on every launch.",
+    Callback = function()
+        local chosen = profileList:Get()
+        if not chosen then
+            win:Notify({ Title = "CONFIG", Text = "No profile selected." })
+            return
+        end
+        win:SetMaster(chosen)
+        masterLabel:Set("MASTER: " .. chosen)
+        win:Notify({ Title = "CONFIG", Text = "Master: " .. chosen })
+    end,
+})
+
+system:Button({
+    Text = "CLEAR MASTER",
+    Desc = "Stop loading anything automatically.",
+    Callback = function()
+        win:SetMaster(false)
+        masterLabel:Set("MASTER: нет")
+        win:Notify({ Title = "CONFIG", Text = "Master cleared." })
+    end,
+})
+
 system:Button({
     Text = "DELETE",
     Desc = "Remove the selected profile.",
@@ -432,6 +471,8 @@ system:Keybind({
     Changed = function(key) win:SetToggleKey(key) end,
 })
 
+system:Divider()
+
 system:Label("Drag the window by its header.")
 
 --== секции, колонки и остальные элементы ====================================
@@ -494,11 +535,15 @@ more:Button({
     Callback = function()
         progressRun = progressRun + 1
         local run = progressRun
-        progress:Set(0, "0 / 10")
+        -- Доля и подпись -- разные вызовы. Второй параметр Set во всей
+        -- библиотеке означает silent, и полоса не исключение.
+        progress:Set(0)
+        progress:SetValue("0 / 10")
         for i = 1, 10 do
             task.delay(i * 0.2, function()
                 if run ~= progressRun then return end
-                progress:Set(i / 10, ("%d / 10"):format(i))
+                progress:Set(i / 10)
+                progress:SetValue(("%d / 10"):format(i))
             end)
         end
     end,
@@ -537,6 +582,47 @@ more:Toggle({
 
 more:Divider()
 
+-- МЕНЮ ПРАВОЙ КНОПКИ: в отличие от Settings, где набор контролов выводится из
+-- значений, сюда кладутся ЛЮБЫЕ виджеты -- те же самые, что и во вкладку. Меню
+-- это контейнер, и виджеты о нём ничего не знают.
+--
+-- Открыть можно сразу несколько, по разным строкам, и сравнить их рядом. Окна
+-- расходятся сами, чтобы не налезать; перетащенное запоминает своё место до
+-- конца сеанса. Повторная правая кнопка по той же строке закрывает её окно.
+local fly
+fly = more:Toggle({
+    Text = "FLY",
+    Desc = "Right-click: a whole menu of its own -- key, speed, colour, mode.",
+    Default = true,
+    Menu = function(m)
+        -- Эта привязка попадёт в список привязок и будет там [ON] ровно пока
+        -- включён тумблер FLY: состояние берётся у строки-владельца.
+        m:Keybind({ Text = "FLY", Default = Enum.KeyCode.F,
+            Changed = function(k) print("[demo] fly key:", k.Name) end })
+        m:Slider({ Text = "SPEED", Min = 16, Max = 200, Default = 60,
+            Callback = function(v) print("[demo] fly speed:", v) end })
+        m:Segmented({ Text = "MODE", Options = { "CFR", "VEL" } })
+        m:ColorPicker({ Text = "TRAIL", Default = Color3.fromRGB(120, 180, 255) })
+        m:Divider()
+        -- Виджет внутри меню умеет всё то же, что и снаружи: здесь он гасит
+        -- саму строку, из которой меню открыто.
+        m:Button({ Text = "OFF", Value = ">",
+            Callback = function() fly:Set(false) end })
+    end,
+})
+
+-- Меню есть у ЛЮБОЙ строки, а не только у переключателя.
+more:Slider({
+    Text = "REACH", Min = 1, Max = 30, Default = 12,
+    Desc = "Right-click works on a slider row too.",
+    Menu = function(m)
+        m:Toggle({ Text = "SMOOTH", Default = true })
+        m:Slider({ Text = "TICKS", Min = 1, Max = 60, Default = 20 })
+    end,
+})
+
+more:Divider()
+
 -- Счётчик нажатий -- прикладная логика, поэтому он ЗДЕСЬ, а не в библиотеке.
 -- Кнопка умеет только показать то, что ей дали; считает вызывающий.
 local clicks = 0
@@ -554,6 +640,39 @@ clickButton = more:Button({
         end
     end,
 })
+
+-- ХУД: видно при ЗАКРЫТОМ меню. Счётчик кадров и список привязок -- это один и
+-- тот же постоянный слой с разной начинкой.
+-- Flag у худа сохраняет его ПОЛОЖЕНИЕ: перетащил слой в удобный угол -- он там
+-- и останется после перезапуска. Видимостью заведуют тумблеры ниже, у них свои
+-- флаги: два хозяина у одного значения означали бы, что при загрузке побеждает
+-- случайный.
+local fpsHud = win:FpsCounter({ X = 24, Y = 90, Visible = false, Flag = "hudFpsAt" })
+local bindHud = win:BindList({ X = 24, Y = 130, Title = "KEYBINDS",
+                               Mode = "all", Visible = false, Flag = "hudBindsAt" })
+
+more:Toggle({
+    Text = "FPS COUNTER",
+    Desc = "A panel that stays on screen with the menu closed. Drag it.",
+    Default = false, Flag = "hudFps",
+    Callback = function(on) fpsHud:SetVisible(on) end,
+})
+
+more:Toggle({
+    Text = "KEYBIND LIST",
+    Desc = "Binds declared in row menus; [ON] follows the row they belong to.",
+    Default = false, Flag = "hudBinds",
+    Callback = function(on) bindHud:SetVisible(on) end,
+})
+
+more:Segmented({
+    Text = "BIND LIST",
+    Options = { "ALL", "ACTIVE" }, Default = "ALL", Flag = "hudBindMode",
+    Desc = "ALL shows every bind with [ON]/[OFF], ACTIVE only the enabled ones.",
+    Callback = function(v) bindHud:SetMode(v == "ACTIVE" and "active" or "all") end,
+})
+
+more:Divider()
 
 more:Button({
     Text = "RESET COUNTER",

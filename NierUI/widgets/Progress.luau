@@ -5,7 +5,8 @@
 --
 --     local bar = tab:Progress({ Text = "LOADING", Default = 0 })
 --     bar:Set(0.42)                 доля от нуля до единицы
---     bar:Set(0.42, "42 / 100")     своя подпись вместо процентов
+--     bar:SetValue("42 / 100")      своя подпись вместо процентов
+--     bar:SetValue(nil)             вернуть проценты
 --
 -- Только показывает. Ничего не считает и ни на что не подписывается: чем
 -- заполнять -- дело вызывающего. Это осознанно, иначе полосе пришлось бы знать
@@ -15,7 +16,8 @@ local THEME = NierUI.Theme
 local U = NierUI.util
 
 NierUI.widget("Progress", function(tab, opts)
-    local row, _, value, invert = NierUI.makeRow(tab, opts.Text, opts.Desc)
+    local row, _, value, invert, _, rowApi =
+        NierUI.makeRow(tab, opts.Text, opts.Desc, nil, opts)
 
     -- Геометрия как у дорожки ползунка -- те же доли, поэтому полоса и ползунок
     -- в соседних строках стоят вровень.
@@ -46,12 +48,43 @@ NierUI.widget("Progress", function(tab, opts)
     end
     render()
 
+    if opts.Enabled == false then rowApi.setEnabled(false) end
+
     return NierUI.bind(tab, opts, {
         Get = function(_) return current end,
-        Set = function(_, fraction, text)
+
+        -- ВТОРОЙ ПАРАМЕТР Set ВЕЗДЕ ОЗНАЧАЕТ ОДНО И ТО ЖЕ -- «без обратного
+        -- вызова». Полоса была единственной строкой, где он значил другое:
+        -- подпись. Стоило чему-нибудь позвать общий Set(значение, true) --
+        -- конфигу, менеджеру, чужому коду, гасящему группу строк, -- и в поле
+        -- уезжало булево значение, а отрисовка падала на присваивании.
+        --
+        -- Подпись теперь ставится SetValue -- тем же примитивом, каким её
+        -- ставит кнопка. Одно имя на одно действие во всей библиотеке.
+        Set = function(_, fraction, silent)
+            if type(silent) == "string" then
+                error(("[NierUI] строка «%s»: Set(доля, подпись) больше нет -- "
+                    .. "подпись ставится :SetValue(текст)")
+                    :format(tostring(opts.Text or "?")), 2)
+            end
             current = math.clamp(tonumber(fraction) or 0, 0, 1)
-            caption = text
             render()
         end,
+
+        -- Своя подпись вместо процентов; nil возвращает проценты.
+        SetValue = function(_, text)
+            caption = text ~= nil and tostring(text) or nil
+            render()
+        end,
+        -- Пара доступности есть у ВСЕХ обработчиков, и полоса не исключение:
+        -- README обещает её всем, а тот, кто гасит группу строк разом, не
+        -- обязан помнить, какая из них показывает, а какая принимает ввод.
+        SetEnabled = function(_, on)
+            rowApi.setEnabled(on)
+            -- Заливка -- не текст, общее приглушение подписей до неё не
+            -- достаёт; гасим отдельно, как образец у палитры.
+            fill.BackgroundTransparency = on and 0 or 0.6
+        end,
+        IsEnabled = function(_) return rowApi.isEnabled() end,
     })
 end)

@@ -34,8 +34,21 @@ local Sub = {}
 Sub.__index = NierUI.containerIndex(Sub)
 
 local function makeSub(parent, page)
-    return setmetatable({ window = parent.window, rows = 0, page = page }, Sub)
+    return setmetatable({
+        window = parent.window, rows = 0, page = page,
+        -- Сток НАСЛЕДУЕТСЯ, а не берётся у окна: секция внутри временного
+        -- контейнера обязана гаснуть вместе с ним. Взяв оконный, она пережила
+        -- бы своего родителя вместе со всеми подписками виджетов внутри.
+        conns = parent.conns,
+        -- Владелец тоже наследуется: привязка в секции внутри меню принадлежит
+        -- той же строке, что и меню.
+        owner = parent.owner, pendingMenu = false, pendingSettings = false,
+    }, Sub)
 end
+
+-- Наружу: динамическому списку нужен собственный кусок страницы, который можно
+-- чистить целиком, не задевая соседей по контейнеру.
+NierUI.makeSub = makeSub
 
 --=============================================================================
 -- Секция
@@ -103,19 +116,18 @@ function C.Section(self, title, opts)
         body.Visible = open
     end
 
-    table.insert(self.window.conns,
-        body:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout))
+    NierUI.connect(self, body:GetPropertyChangedSignal("AbsoluteSize"), relayout)
 
-    table.insert(self.window.conns, header.MouseButton1Click:Connect(function()
+    NierUI.connect(self, header.MouseButton1Click, function()
         open = not open
         relayout()
-    end))
-    table.insert(self.window.conns, header.MouseEnter:Connect(function()
+    end)
+    NierUI.connect(self, header.MouseEnter, function()
         label.TextColor3 = THEME.Ink
-    end))
-    table.insert(self.window.conns, header.MouseLeave:Connect(function()
+    end)
+    NierUI.connect(self, header.MouseLeave, function()
         label.TextColor3 = THEME.InkSoft
-    end))
+    end)
 
     relayout()
 
@@ -146,13 +158,25 @@ function C.Split(self, count, opts)
     local columns = {}
     local share = 1 / count
 
+    -- ЗАЗОР ДЕЛИТСЯ ПО ЧИСЛУ ЩЕЛЕЙ, А ОТСТУП КОЛОНКИ РАСТЁТ ВМЕСТЕ С НОМЕРОМ.
+    --
+    -- Раньше отступ был один и тот же (gap/2) у всех колонок кроме первой, а
+    -- ширина уменьшалась на gap*(count-1)/count. На двух колонках это сходилось
+    -- точно и потому не вызывало вопросов; на трёх зазоры выходили 7 и 4, на
+    -- четырёх расходились ещё сильнее -- колонки визуально разъезжались, хотя
+    -- ширина у всех была одинаковой.
+    --
+    -- Щелей ровно count-1, каждая шириной gap. Колонка отдаёт долю зазора,
+    -- пропорциональную числу щелей, а её левый край сдвигается на столько
+    -- зазоров, сколько щелей осталось слева.
+    local shrink = gap * (count - 1) / count
+
     for index = 1, count do
-        -- Ширина долей минус доля зазора: колонки складываются в единицу без
-        -- переполнения при любом количестве.
         local column = U.new("Frame", {
             BackgroundTransparency = 1,
-            Position = UDim2.new(share * (index - 1), index > 1 and gap / 2 or 0, 0, 0),
-            Size = UDim2.new(share, -gap * (count - 1) / count, 0, 0),
+            Position = UDim2.new(share * (index - 1),
+                gap * (index - 1) - shrink * (index - 1), 0, 0),
+            Size = UDim2.new(share, -shrink, 0, 0),
             AutomaticSize = Enum.AutomaticSize.Y,
         }, holder)
         U.new("UIListLayout", {

@@ -5,9 +5,10 @@
 # коллизий локальных имён и никакого упора в лимит локалей на функцию), а
 # добавление виджета -- это ровно один новый файл в списке ниже.
 #
-# Собирается два файла:
+# Собирается три файла:
 #   dist\NierUI.luau      только библиотека, возвращает таблицу
-#   dist\NierUIDemo.luau  библиотека + витрина, это грузим для проверки
+#   dist\NierUIDemo.luau  библиотека + общая витрина
+#   dist\BindDemo.luau    библиотека + витрина привязок, только ядро биндов
 #
 # Пишем ЧЕРЕЗ .NET без BOM: Luau падает на BOM ещё до первой строки.
 
@@ -20,6 +21,7 @@ $dist = Join-Path $root 'dist'
 #   Theme  -- его читают все остальные при загрузке;
 #   Util   -- им пользуются Row, Window и виджеты;
 #   Row    -- общий каркас строки и раскрывающейся панели;
+#   Binds  -- ядро привязок; окно заводит его в конструкторе, значит до Window;
 #   Window -- заводит реестр виджетов, без него им негде регистрироваться;
 #   widgets-- только регистрируются, ничего не строят до вызова.
 $parts = @(
@@ -28,6 +30,7 @@ $parts = @(
     'NierUI\Texture.luau'
     'NierUI\ColorControl.luau'
     'NierUI\Row.luau'
+    'NierUI\Binds.luau'
     'NierUI\Window.luau'
     'NierUI\Block.luau'
     'NierUI\Section.luau'
@@ -37,6 +40,9 @@ $parts = @(
     'NierUI\Notify.luau'
     'NierUI\Trigger.luau'
     'NierUI\Popup.luau'
+    'NierUI\Panel.luau'
+    'NierUI\Hud.luau'
+    'NierUI\Context.luau'
     'NierUI\Modal.luau'
     'NierUI\OptionSettings.luau'
     'NierUI\widgets\Basic.luau'
@@ -78,18 +84,26 @@ $noBom = New-Object System.Text.UTF8Encoding($false)
 
 # Витрина: библиотека сворачивается в вызов функции, её результат ложится в
 # локальную NierUI, демо идёт следом и её видит.
-$demo = New-Object System.Text.StringBuilder
-[void]$demo.AppendLine('--!nocheck')
-[void]$demo.AppendLine('-- NierUI + витрина. Собрано lib\build.ps1.')
-[void]$demo.AppendLine('')
-[void]$demo.AppendLine('local NierUI = (function()')
-[void]$demo.AppendLine($lib.ToString())
-[void]$demo.AppendLine('end)()')
-[void]$demo.AppendLine('')
-[void]$demo.AppendLine((Read-Part 'demo.luau'))
+#
+# Витрин две и будет больше, поэтому сборка одна на все: копия этих восьми строк
+# на каждую означала бы, что однажды они разойдутся.
+function Write-Demo([string]$source, [string]$target, [string]$title) {
+    $demo = New-Object System.Text.StringBuilder
+    [void]$demo.AppendLine('--!nocheck')
+    [void]$demo.AppendLine("-- NierUI + $title. Собрано lib\build.ps1.")
+    [void]$demo.AppendLine('')
+    [void]$demo.AppendLine('local NierUI = (function()')
+    [void]$demo.AppendLine($lib.ToString())
+    [void]$demo.AppendLine('end)()')
+    [void]$demo.AppendLine('')
+    [void]$demo.AppendLine((Read-Part $source))
 
-[System.IO.File]::WriteAllText((Join-Path $dist 'NierUIDemo.luau'), $demo.ToString(), $noBom)
+    [System.IO.File]::WriteAllText((Join-Path $dist $target), $demo.ToString(), $noBom)
+    return [math]::Round((Get-Item (Join-Path $dist $target)).Length / 1024, 1)
+}
+
+$b = Write-Demo 'demo.luau' 'NierUIDemo.luau' 'витрина'
+$c = Write-Demo 'binds-demo.luau' 'BindDemo.luau' 'витрина привязок'
 
 $a = [math]::Round((Get-Item (Join-Path $dist 'NierUI.luau')).Length / 1024, 1)
-$b = [math]::Round((Get-Item (Join-Path $dist 'NierUIDemo.luau')).Length / 1024, 1)
-Write-Output "собрано: NierUI.luau ($a КБ), NierUIDemo.luau ($b КБ), частей: $($parts.Count)"
+Write-Output "собрано: NierUI.luau ($a КБ), NierUIDemo.luau ($b КБ), BindDemo.luau ($c КБ), частей: $($parts.Count)"

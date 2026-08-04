@@ -15,7 +15,8 @@ local FIELD_HEIGHT = 100
 local PANEL_HEIGHT = FIELD_HEIGHT + NierUI.colorControlExtra + 20
 
 NierUI.widget("ColorPicker", function(tab, opts)
-    local row, _, value, invert, setHeld, rowApi = NierUI.makeRow(tab, opts.Text, opts.Desc)
+    local row, _, value, invert, setHeld, rowApi =
+        NierUI.makeRow(tab, opts.Text, opts.Desc, nil, opts)
     local window = tab.window
 
     -- Образец встаёт по той же доле, что и дорожка ползунка (см. Theme):
@@ -37,7 +38,10 @@ NierUI.widget("ColorPicker", function(tab, opts)
         Position = UDim2.fromOffset(12, 10),
         Width = 0, Height = FIELD_HEIGHT,
         Color = opts.Default,
-        sink = window.conns,
+        -- Палитра слушает мышь глобально и обязана уметь отключаться: сток
+        -- берём у контейнера, а не у окна. Во временном контейнере эти две
+        -- подписки иначе переживали бы его.
+        sink = NierUI.sink(tab),
         ZIndex = 30,
         Callback = function(c)
             swatch.BackgroundColor3 = c
@@ -64,12 +68,12 @@ NierUI.widget("ColorPicker", function(tab, opts)
     -- точку последнего нажатия. Это ловит и простой щелчок без движения, чего
     -- прежний сторож не умел.
     local open = false
-    table.insert(window.conns, row.MouseButton1Click:Connect(rowApi.gate(function()
+    NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
         if open and U.inside(panel, window.lastPress) then return end
         open = not open
         setPanel(open)
         setHeld(open)
-    end)))
+    end))
 
     if opts.Enabled == false then rowApi.setEnabled(false) end
 

@@ -118,6 +118,69 @@ function U.inside(frame, position)
        and position.Y >= p.Y and position.Y <= p.Y + s.Y
 end
 
+--=============================================================================
+-- ТЕКСТ СЧИТАЕТСЯ В СИМВОЛАХ, А НЕ В БАЙТАХ
+--=============================================================================
+--
+-- В Luau `#s` -- это длина в БАЙТАХ, а кириллическая буква в UTF-8 занимает два.
+-- Отсюда три поломки подряд, найденные в один заход:
+--
+--   предел длины поля ввода резал русское имя вдвое короче обещанного, а на
+--     границе разрубал букву пополам -- в поле вылезал знак-заменитель;
+--   высота окна подтверждения прикидывалась по числу байт, и русский текст
+--     давал вдвое больше строк, чем нужно;
+--   список привязок обрезал имя тем же способом.
+--
+-- Поэтому счёт и обрезка живут ЗДЕСЬ, одним разом на всю библиотеку: три копии
+-- этого разбора однажды разъехались бы, как уже разъезжался захват клавиши.
+
+-- Длина в символах. nil -- строка не UTF-8; вызывающий решает сам, что с этим
+-- делать, и обычно правильный ответ -- «не трогать».
+function U.textLength(text)
+    return utf8.len(text)
+end
+
+-- Обрезать до limit СИМВОЛОВ. Не UTF-8 или и так короткая -- отдаём как есть:
+-- испорченный текст лучше испорченного текста, обрезанного наугад.
+function U.textCut(text, limit)
+    local length = utf8.len(text)
+    if not length or length <= limit then return text end
+    local stop = utf8.offset(text, limit + 1)
+    if not stop then return text end
+    return text:sub(1, stop - 1)
+end
+
+--=============================================================================
+-- ПРИВЕДЕНИЕ К НИЖНЕМУ РЕГИСТРУ ЗНАЕТ ПРО КИРИЛЛИЦУ
+--=============================================================================
+--
+-- string.lower в Lua работает только с латиницей: «АНТИАИМ» после него остаётся
+-- «АНТИАИМ». Поиск в списках сравнивает как раз приведённые строки -- то есть по
+-- русским названиям он был РЕГИСТРОЗАВИСИМЫМ, и набранное строчными не находило
+-- ничего. Заметно это стало на своём же менеджере привязок: там поиск идёт по
+-- названиям вроде «АНТИАИМ ВЛЕВО».
+--
+-- Таблиц не заводим -- у кириллицы регистры разведены арифметикой: А..Я лежат
+-- на 0x20 ниже а..я, и отдельного разбора требует только Ё.
+local function lowerCode(code)
+    if code >= 65 and code <= 90 then return code + 32 end          -- A..Z
+    if code >= 0x410 and code <= 0x42F then return code + 0x20 end  -- А..Я
+    if code == 0x401 then return 0x451 end                          -- Ё
+    return code
+end
+
+function U.lower(text)
+    -- Чистая латиница -- штатным путём: обход по кодам дороже, а выигрыша нет.
+    if not text:find("[\128-\255]") then return text:lower() end
+    if not utf8.len(text) then return text:lower() end
+
+    local out = {}
+    for _, code in utf8.codes(text) do
+        out[#out + 1] = utf8.char(lowerCode(code))
+    end
+    return table.concat(out)
+end
+
 function U.hex(color)
     return ("#%02X%02X%02X"):format(
         math.floor(color.R * 255 + 0.5),
@@ -150,15 +213,21 @@ end
 function U.matchScore(text, query)
     if query == "" then return 0, 1 end
 
-    local haystack, needle = tostring(text):lower(), tostring(query):lower()
+    -- Через U.lower, а не string.lower: тот знает только латиницу, и по русским
+    -- названиям поиск был регистрозависимым.
+    local haystack, needle = U.lower(tostring(text)), U.lower(tostring(query))
     local length = #needle
 
     if haystack:sub(1, length) == needle then return 0, 1 end
 
-    -- начало любого слова: границей считается всё, что не буква и не цифра
+    -- Начало любого слова: границей считается всё, что не буква и не цифра.
+    --
+    -- Байты со старшим битом идут в слово наравне с %w -- иначе кириллица
+    -- границей не считается вовсе, и разряд «с запроса начинается слово» для
+    -- русских названий не срабатывал никогда.
     local pos = 1
     while true do
-        local from, to = haystack:find("%w+", pos)
+        local from, to = haystack:find("[%w\128-\255]+", pos)
         if not from then break end
         if haystack:sub(from, from + length - 1) == needle then return 1, from end
         pos = to + 1

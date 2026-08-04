@@ -59,8 +59,25 @@ local function normalize(list)
 end
 
 local function build(tab, opts, multi)
-    local row, _, value, _, setHeld, rowApi = NierUI.makeRow(tab, opts.Text, opts.Desc)
+    -- SETTINGS У СПИСКА ОЗНАЧАЕТ НЕ ТО ЖЕ, ЧТО У СТРОКИ.
+    --
+    -- У строки это набор «поле -> значение», один уровень. Здесь -- настройки
+    -- ПУНКТОВ, по набору на каждый ключ, то есть два уровня. Каркас, который
+    -- теперь подключает настройки любой строке сам, развернул бы их как свои и
+    -- упёрся в таблицу там, где ждал значение.
+    --
+    -- Прячем поле от него подстановкой, а не копией всей таблицы: остальные
+    -- поля читаются через __index и остаются теми же самыми.
+    local rowOpts = setmetatable({ Settings = false }, { __index = opts })
+
+    local row, _, value, _, setHeld, rowApi =
+        NierUI.makeRow(tab, opts.Text, opts.Desc, nil, rowOpts)
     local window = tab.window
+
+    -- Своё имя списка: ключи пунктов у двух разных списков совпадают запросто
+    -- («NAMES» есть и там и там), а память положения окна настроек ведётся по
+    -- ключу пункта -- без имени списка два списка делили бы её на двоих.
+    local listId = U.randomName()
 
     -- ДВА НАБОРА, И ЭТО ПРИНЦИПИАЛЬНО.
     --
@@ -109,12 +126,24 @@ local function build(tab, opts, multi)
 
     -- Ответ всегда в порядке пунктов, а не в порядке щелчков: иначе один и тот
     -- же набор выглядел бы по-разному в зависимости от того, как его натыкали.
+    --
+    -- ВТОРЫМ ЗНАЧЕНИЕМ -- ПОДПИСИ, И ЭТО НЕ УДОБСТВО.
+    --
+    -- Наружу и в профиль уходит КЛЮЧ, а человеку показывается ПОДПИСЬ, и это
+    -- разные вещи ровно там, где их и развели: { Text = "Игрок", Key = 12345 }.
+    -- В строке при этом писался ключ -- то есть «12345» вместо имени, -- и
+    -- раздельная форма, которую README рекомендует как основную при совпадающих
+    -- подписях, делала строку нечитаемой. Собираем оба за один обход: второй
+    -- ради подписи -- это второй ответ на тот же вопрос.
     local function picked()
-        local out = {}
+        local keys, labels = {}, {}
         for _, entry in ipairs(source) do
-            if chosen[entry.key] then out[#out + 1] = entry.key end
+            if chosen[entry.key] then
+                keys[#keys + 1] = entry.key
+                labels[#labels + 1] = entry.text
+            end
         end
-        return out
+        return keys, labels
     end
 
     local function specFor(entry)
@@ -143,13 +172,13 @@ local function build(tab, opts, multi)
     local repaint = {}
 
     local function render()
-        local sel = picked()
+        local sel, labels = picked()
         if not multi then
-            value.Text = sel[1] ~= nil and tostring(sel[1]) or "NONE"
+            value.Text = sel[1] ~= nil and labels[1] or "NONE"
         elseif #sel == 0 then
             value.Text = "NONE"
         elseif #sel == 1 then
-            value.Text = tostring(sel[1])
+            value.Text = labels[1]
         else
             -- Перечислять всё в стопиксельном поле бессмысленно, а рисовать
             -- обрезок с многоточием -- врать о содержимом. Число честнее.
@@ -176,8 +205,7 @@ local function build(tab, opts, multi)
         bar.Position = UDim2.new(1, -4, 0, 2 + math.floor((travel - height) * progress))
     end
 
-    table.insert(window.conns,
-        list:GetPropertyChangedSignal("CanvasPosition"):Connect(updateBar))
+    NierUI.connect(tab, list:GetPropertyChangedSignal("CanvasPosition"), updateBar)
 
     local function setOpen(state)
         open = state
@@ -209,7 +237,14 @@ local function build(tab, opts, multi)
         table.clear(itemConns)
         table.clear(repaint)
         for _, child in ipairs(list:GetChildren()) do
-            if child:IsA("TextButton") then child:Destroy() end
+            if child:IsA("TextButton") then
+                -- Цель правой кнопки снимается ВМЕСТЕ с пунктом. Список
+                -- пересобирается на каждое изменение источника и на каждую
+                -- букву в поиске -- без снятия реестр рос бы неограниченно,
+                -- ровно как когда-то рос window.conns.
+                NierUI.contextForget(window, child)
+                child:Destroy()
+            end
         end
     end
 
@@ -314,13 +349,27 @@ local function build(tab, opts, multi)
             end
         end))
 
+        -- Правая кнопка -- через реестр окна: при открытом окне настроек до
+        -- пункта она не доходит, его перехватывает фон всплывающего. Ровно
+        -- из-за этого нельзя было открыть настройки двух масок рядом и
+        -- сравнить их. См. Context.
         if spec then
-            table.insert(itemConns, item.MouseButton2Click:Connect(function()
-                NierUI.optionSettings(window, item, entry.text, spec, store,
-                    function(field, v)
+            NierUI.contextTarget(window, item, function(onClosed)
+                return NierUI.optionSettings(window, {
+                    Anchor = item, Title = entry.text,
+                    Spec = spec, State = store,
+                    OnChange = function(field, v)
                         if opts.OnSetting then pcall(opts.OnSetting, key, field, v) end
-                    end)
-            end))
+                    end,
+                    OnClose = onClosed,
+                    -- Ключ памяти -- ПО КЛЮЧУ ПУНКТА, а не по кнопке: кнопки
+                    -- пересобираются на каждое изменение источника и на каждую
+                    -- букву в поиске, и память положения умирала бы вместе с
+                    -- ними. У ключа пункта та же роль, что у выбора и настроек:
+                    -- он переживает пересборку.
+                    Place = listId .. "\0" .. tostring(key),
+                })
+            end)
         end
     end
 
@@ -409,27 +458,41 @@ local function build(tab, opts, multi)
             Size = UDim2.new(1, 0, 0, 1), ZIndex = 31,
         }, panel)
 
-        table.insert(window.conns, search:GetPropertyChangedSignal("Text"):Connect(function()
+        NierUI.connect(tab, search:GetPropertyChangedSignal("Text"), function()
             query = search.Text
             refilter()
-        end))
+        end)
 
         -- Закрыли список -- сбрасываем запрос: иначе он откроется отфильтрованным
         -- и будет выглядеть наполовину пустым без видимой причины.
-        table.insert(window.conns, panel:GetPropertyChangedSignal("Visible"):Connect(function()
+        NierUI.connect(tab, panel:GetPropertyChangedSignal("Visible"), function()
             if panel.Visible or search.Text == "" then return end
             search.Text = ""
-        end))
+        end)
     end
 
     --== начальный выбор =====================================================
 
+    -- DEFAULT = FALSE ОЗНАЧАЕТ «НИЧЕГО НЕ ВЫБРАНО».
+    --
+    -- Отличать это от «не сказано» надо: не сказано -- список сам отмечает первый
+    -- пункт, и строка выглядит так, будто выбор уже сделан. Там, где список
+    -- предлагает ДЕЙСТВИЕ («что добавить»), это прямая ложь.
+    --
+    -- nil на эту роль не годится -- он и есть «не сказано», -- поэтому false. В
+    -- ключи он при этом не попадает: отмеченный `false` был бы пунктом, которого
+    -- нет ни в одном наборе, и жил бы в выборе вечно.
+    local function choose(key)
+        if key == nil or key == false then return end
+        chosen[key] = true
+    end
+
     if multi then
-        for _, v in ipairs(opts.Default or {}) do chosen[v] = true end
+        for _, v in ipairs(opts.Default or {}) do choose(v) end
     else
         local single = opts.Default
         if single == nil and entries[1] then single = entries[1].key end
-        if single ~= nil then chosen[single] = true end
+        choose(single)
     end
 
     rebuild()
@@ -437,10 +500,10 @@ local function build(tab, opts, multi)
     -- Та же защита, что у палитры: раскрытая панель лежит ВНУТРИ строки, и
     -- щелчок по её пустому месту доходил бы до строки и схлопывал список.
     -- Пункты -- кнопки и щелчок съедают сами, а вот поля вокруг них нет.
-    table.insert(window.conns, row.MouseButton1Click:Connect(rowApi.gate(function()
+    NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
         if open and U.inside(panel, window.lastPress) then return end
         setOpen(not open)
-    end)))
+    end))
 
     --=========================================================================
     -- Наружу
@@ -483,8 +546,23 @@ local function build(tab, opts, multi)
             return store[field]
         end,
         SetSetting = function(_, key, field, v)
+            -- ЗАВОДИМ ХРАНИЛИЩЕ, ЕСЛИ ЕГО ЕЩЁ НЕТ.
+            --
+            -- Раньше здесь стоял молчаливый выход. Хранилище появляется, когда
+            -- пункт ПОСТРОЕН, а профиль применяется к списку, который мог ещё
+            -- не получить свой набор через Refresh, -- и все настройки пунктов
+            -- пропадали без следа. Ровно тот же класс тихой потери, что уже
+            -- чинили выше в GetSetting.
+            --
+            -- Настройка ключа, которого в наборе нет, при этом не мусор: выбор и
+            -- настройки хранятся ПО КЛЮЧУ и переживают пересборку намеренно --
+            -- вернётся ключ, вернётся и накрученное. Кому нужна зачистка, у того
+            -- есть Prune.
             local store = settings[key]
-            if not store then return end
+            if not store then
+                store = {}
+                settings[key] = store
+            end
             store[field] = v
             -- Как и у строки: загрузка профиля применяет настройку, а не
             -- только запоминает.
@@ -520,10 +598,16 @@ local function build(tab, opts, multi)
     end
 
     if multi then
-        api.Get = function(_) return picked() end
+        -- Через переменную: picked отдаёт ДВА значения, и `return picked()`
+        -- вернул бы вызывающему заодно и подписи -- второй ответ на вопрос,
+        -- которого он не задавал.
+        api.Get = function(_)
+            local keys = picked()
+            return keys
+        end
         api.Set = function(_, values, silent)
             table.clear(chosen)
-            for _, v in ipairs(values or {}) do chosen[v] = true end
+            for _, v in ipairs(values or {}) do choose(v) end
             render()
             -- Наружу отдаём picked(), а не values: он идёт в порядке пунктов и
             -- не содержит ключей, которых в наборе нет.
@@ -531,10 +615,13 @@ local function build(tab, opts, multi)
         end
         api.Has = function(_, key) return chosen[key] == true end
     else
-        api.Get = function(_) return picked()[1] end
+        api.Get = function(_)
+            local keys = picked()
+            return keys[1]
+        end
         api.Set = function(_, v, silent)
             table.clear(chosen)
-            if v ~= nil then chosen[v] = true end
+            choose(v)
             render()
             notify(v, silent)
         end

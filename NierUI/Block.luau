@@ -351,10 +351,9 @@ local function ensureGrid(tab)
 
     -- Разделители стоят в целых пикселях, значит зависят от размера сетки:
     -- меняется окно -- пересчитываем, иначе линии разъедутся от центра.
-    table.insert(tab.window.conns,
-        tab.grid:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-            layoutSeparators(tab)
-        end))
+    NierUI.connect(tab, tab.grid:GetPropertyChangedSignal("AbsoluteSize"), function()
+        layoutSeparators(tab)
+    end)
 
     return tab.grid
 end
@@ -399,6 +398,10 @@ function Tab:Block(...)
     -- существующее значение.
     local block = setmetatable({
         window = self.window, rows = 0,
+        -- Сток НАСЛЕДУЕТСЯ от вкладки: блок живёт ровно столько же, сколько
+        -- она, а внутри временного контейнера обязан гаснуть вместе с ним.
+        conns = self.conns,
+        owner = self.owner, pendingMenu = false, pendingSettings = false,
         x = x, y = y, title = title,
         cells = false,
     }, Block)

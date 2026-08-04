@@ -45,7 +45,15 @@ local U = NierUI.util
 --
 -- Поле НЕ ставится по умолчанию намеренно: TextBox перехватывает щелчки, и у
 -- переключателя нажатие по «[ ON ]» перестало бы переключать строку.
-function NierUI.makeRow(tab, text, desc, valueClass)
+-- opts -- те же настройки, что виджет получил снаружи. Нужны каркасу ровно для
+-- одного: подключить меню правой кнопки ЗДЕСЬ, а не в каждом виджете отдельно.
+--
+-- Раньше настройки строки были привилегией переключателя -- единственного, кто
+-- звал rowApi.settings. Ни у палитры, ни у списка, ни у поля ввода поле Settings
+-- не работало вовсе, и заметить это можно было только по тому, что ничего не
+-- происходит. Меню обязано быть у ЛЮБОЙ строки, а перечислять виджеты по одному
+-- значит однажды забыть очередной.
+function NierUI.makeRow(tab, text, desc, valueClass, opts)
     tab.rows = tab.rows + 1
 
     local row = U.new("TextButton", {
@@ -68,13 +76,23 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         Size = UDim2.fromOffset(4, 4), ZIndex = 3,
     }, row)
 
+    -- ДОЛИ ПОДПИСИ И ЗНАЧЕНИЯ МОЖНО ЗАДАТЬ СТРОКЕ ОТДЕЛЬНО.
+    --
+    -- Умолчания рассчитаны на страницу вкладки. В узком контейнере -- меню
+    -- правой кнопки шириной 220 -- те же доли дают под значение полсотни
+    -- пикселей, и «NO COOLDOWN» превращается в «NO». Виноваты не умолчания, а
+    -- то, что их нечем было поправить на месте: у строки с длинным значением и
+    -- коротким названием соотношение обратное обычному.
+    local labelFrac = (opts and opts.LabelFrac) or THEME.LabelFrac
+    local valueFrac = (opts and opts.ValueFrac) or THEME.ValueFrac
+
     local label = U.new("TextLabel", {
         BackgroundTransparency = 1, Font = THEME.Font,
         Text = text or "", TextColor3 = THEME.Ink, TextSize = THEME.TextSize,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         Position = UDim2.fromOffset(14, 0),
-        Size = UDim2.new(THEME.LabelFrac, 0, 0, THEME.RowHeight), ZIndex = 3,
+        Size = UDim2.new(labelFrac, 0, 0, THEME.RowHeight), ZIndex = 3,
     }, row)
 
     local value
@@ -103,7 +121,7 @@ function NierUI.makeRow(tab, text, desc, valueClass)
             TextTruncate = Enum.TextTruncate.AtEnd,
             AnchorPoint = Vector2.new(1, 0),
             Position = UDim2.new(1, -10, 0, 0),
-            Size = UDim2.new(THEME.ValueFrac, 0, 0, THEME.RowHeight), ZIndex = 3,
+            Size = UDim2.new(valueFrac, 0, 0, THEME.RowHeight), ZIndex = 3,
         }, row)
     end
 
@@ -159,15 +177,15 @@ function NierUI.makeRow(tab, text, desc, valueClass)
     end
 
     local window = tab.window
-    table.insert(window.conns, row.MouseEnter:Connect(function()
+    NierUI.connect(tab, row.MouseEnter, function()
         hovered = true
         paintRow()
         if desc then window:Hint(desc) end
-    end))
-    table.insert(window.conns, row.MouseLeave:Connect(function()
+    end)
+    NierUI.connect(tab, row.MouseLeave, function()
         hovered = false
         paintRow()
-    end))
+    end)
 
     local function setHeld(state)
         held = state and true or false
@@ -198,19 +216,41 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         fn(false, enabled)
     end
 
-    --== настройки строки по правой кнопке ===================================
+    --== ПРАВАЯ КНОПКА У СТРОКИ ОДНА =========================================
     --
-    -- Тот же механизм, что у пунктов списка, но для ЛЮБОЙ строки. Раньше
-    -- настройки были привилегией пунктов, хотя причина этому была только
-    -- историческая: строке они нужны ничуть не реже -- клавиша активации,
-    -- дополнительный цвет, режим.
+    -- Поводов два -- Menu и Settings, -- а нажатие одно, и разделить их нечем:
+    -- обе цели встают на ОДИН И ТОТ ЖЕ фрейм строки, с одинаковой глубиной в
+    -- дереве. Диспетчер выбирает по глубине (см. Context), при равенстве
+    -- побеждает зарегистрированная позже -- то есть Settings, а Menu не
+    -- открывался бы НИКОГДА.
     --
-    -- Строка с настройками помечается точкой справа: без метки правая кнопка --
-    -- знание, которое неоткуда взять.
-    function rowApi.settings(window, title, spec, state, onChange)
-        if not spec or next(spec) == nil then return end
+    -- Молча -- худший из возможных исходов: точка на месте, правая кнопка что-то
+    -- открывает, и понять, что открылось не то, можно только сверившись с
+    -- кодом. Поэтому ошибка, как на занятом Flag и на занятой клетке блока.
+    --
+    -- Уровень 0: строку с ошибкой всё равно не показать честно -- виджет
+    -- зовётся через воронку containerIndex, и любой конкретный уровень указал бы
+    -- внутрь библиотеки. Имя строки в сообщении однозначнее номера.
+    local m2Claim = false
+    local function claimContext(what)
+        if m2Claim then
+            error(("[NierUI] у строки «%s» правая кнопка уже занята (%s): "
+                .. "Menu и Settings на одной строке несовместимы -- нажатие "
+                .. "одно, а открывать пришлось бы двоих. Переложите настройки "
+                .. "внутрь Menu."):format(tostring(text or "?"), m2Claim), 0)
+        end
+        m2Claim = what
+    end
 
-        local dot = U.new("Frame", {
+    --== метка «здесь есть правая кнопка» ====================================
+    --
+    -- Одна на строку, сколько бы поводов ни было: без метки правая кнопка --
+    -- знание, которое неоткуда взять, а две точки подряд означали бы, что
+    -- поводов два, чего не бывает.
+    local dot = false
+    local function markDot()
+        if dot then return dot end
+        dot = U.new("Frame", {
             BackgroundColor3 = THEME.Ink, BackgroundTransparency = 0.4,
             BorderSizePixel = 0, Active = false,
             AnchorPoint = Vector2.new(1, 0.5),
@@ -224,10 +264,131 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         -- под курсором, подписываем свойство и забываем.
         invert(dot, "BackgroundColor3", THEME.Bg, THEME.Ink)
         paintRow()
+        return dot
+    end
 
-        table.insert(window.conns, row.MouseButton2Click:Connect(gate(function()
-            NierUI.optionSettings(window, row, title, spec, state, onChange)
-        end)))
+    --== МЕНЮ ПРАВОЙ КНОПКИ ==================================================
+    --
+    --     tab:Toggle({
+    --         Text = "ПОЛЁТ",
+    --         Menu = function(m)
+    --             m:Keybind({ Text = "КЛАВИША", Default = Enum.KeyCode.F })
+    --             m:Slider({ Text = "СКОРОСТЬ", Min = 16, Max = 100 })
+    --         end,
+    --     })
+    --
+    -- В отличие от Settings, где набор контролов выводится из значений, здесь
+    -- вызывающий кладёт В МЕНЮ ЛЮБЫЕ ВИДЖЕТЫ -- те же самые, что и во вкладку.
+    -- Меню это контейнер (см. Panel), и виджеты о нём ничего не знают.
+    --
+    -- СОДЕРЖИМОЕ СТРОИТСЯ СРАЗУ, А НЕ ПРИ ПЕРВОМ ОТКРЫТИИ. Отложенная сборка
+    -- сэкономила бы память на неоткрытых меню, но заплатить за неё пришлось бы
+    -- заметной задержкой ровно в тот момент, когда по строке нажали, -- а меню
+    -- обязано появляться мгновенно. Один раз на загрузке дешевле, чем один раз
+    -- на каждом первом нажатии.
+    function rowApi.menu(container, title, builder, width)
+        if type(builder) ~= "function" then return end
+
+        local window = container.window
+        local menu = NierUI.panel(window, { Width = width })
+        builder(menu)
+
+        -- Пустое меню метки не получает и на правую кнопку не отзывается:
+        -- обещать окно, в котором ничего нет, хуже, чем не обещать ничего.
+        if menu.rows == 0 then
+            menu:Destroy()
+            return
+        end
+
+        -- Ключ памяти положения выдаётся ОДИН раз на меню. Сгенерируй его внутри
+        -- открытия -- он менялся бы на каждое нажатие, и запомненное место
+        -- никогда бы не нашлось.
+        local placeId = "menu\0" .. U.randomName()
+
+        -- Оставляем меню воронке в containerIndex: она поставит ему владельца,
+        -- как только виджет вернёт handle. Раньше этого момента владельца не
+        -- существует -- мы внутри его же постройки.
+        container.pendingMenu = menu
+
+        -- Заявка на правую кнопку -- ПОСЛЕ отказа от пустого меню: пустое её не
+        -- занимает и Settings не мешает.
+        claimContext("Menu")
+        markDot()
+        NierUI.contextTarget(window, row, function(onClosed)
+            if not enabled then return nil end
+            menu:Open({ Anchor = row, Title = title, OnClose = onClosed,
+                        Place = placeId })
+            return function() menu:Close() end
+        end, THEME.RowHeight)
+
+        return menu
+    end
+
+    --== настройки строки по правой кнопке ===================================
+    --
+    -- Тот же механизм, что у пунктов списка, но для ЛЮБОЙ строки. Раньше
+    -- настройки были привилегией пунктов, хотя причина этому была только
+    -- историческая: строке они нужны ничуть не реже -- клавиша активации,
+    -- дополнительный цвет, режим.
+    --
+    -- Строка с настройками помечается точкой справа: без метки правая кнопка --
+    -- знание, которое неоткуда взять.
+    function rowApi.settings(window, title, spec, state, onChange)
+        if not spec or next(spec) == nil then return end
+
+        --== ТИП ВЫВОДИТСЯ ИЗ ЗНАЧЕНИЯ, И НЕВЫВОДИМОЕ -- ОШИБКА ===============
+        --
+        -- Веток разбора четыре: описание ползунка, Color3, EnumItem, boolean.
+        -- Всё остальное молча рисовало подпись и НИЧЕГО -- ни контрола, ни
+        -- ошибки. Самая частая опечатка при этом ровно такая: голое 1000 вместо
+        -- описания ползунка, потому что по числу диапазон не угадать.
+        -- Библиотека в остальных таких случаях ругается вслух -- на занятый
+        -- Flag, на Menu с Settings, на неизвестный виджет.
+        --
+        -- Проверяем ЗДЕСЬ, при постройке строки, а не при открытии окошка:
+        -- ошибка должна прилетать на загрузке и указывать на строку, а не
+        -- через полчаса, когда по ней впервые щёлкнут правой кнопкой.
+        for field, descriptor in pairs(spec) do
+            local value = NierUI.settingDefault(descriptor)
+            local kind = typeof(value)
+            local ok = kind == "Color3" or kind == "EnumItem" or kind == "boolean"
+                or (type(descriptor) == "table" and descriptor.Type ~= nil)
+            if not ok then
+                error(("[NierUI] строка «%s», настройка «%s»: по значению типа "
+                    .. "%s контрол не выводится. Цвет -- Color3, клавиша -- "
+                    .. "EnumItem, флаг -- boolean, число -- { Type = \"Slider\", "
+                    .. "Default = ..., Min = ..., Max = ... }.")
+                    :format(tostring(text or "?"), tostring(field), kind), 0)
+            end
+        end
+
+        claimContext("Settings")
+        markDot()
+
+        -- ЧЕРЕЗ РЕЕСТР ОКНА, А НЕ ЧЕРЕЗ MouseButton2Click НА СТРОКЕ.
+        --
+        -- Пока открыто хоть одно всплывающее окно, его фон-перехватчик забирает
+        -- правую кнопку себе, и до строки она не доходит -- открыть настройки
+        -- второго пункта, не закрыв первый, было нельзя. См. Context.
+        -- Целью считается только ПЕРВАЯ строка: у списка и палитры раскрытая
+        -- панель лежит внутри строки и растит её, и без этого правая кнопка по
+        -- раскрытой палитре открывала бы настройки строки вместо своего.
+        -- Ключ памяти положения -- СТРОКА, а не сама строка меню.
+        --
+        -- Окно настроек порождает вложенные (палитра), и их ключи строятся
+        -- склейкой от родительского. Instance склеить нельзя, а tostring по
+        -- нему даёт всего лишь имя -- у двух строк оно совпадёт запросто.
+        -- Собственное имя выдаётся один раз и живёт со строкой.
+        local placeId = "row\0" .. U.randomName()
+
+        NierUI.contextTarget(window, row, function(onClosed)
+            if not enabled then return nil end
+            return NierUI.optionSettings(window, {
+                Anchor = row, Title = title,
+                Spec = spec, State = state, OnChange = onChange,
+                OnClose = onClosed, Place = placeId,
+            })
+        end, THEME.RowHeight)
     end
 
     function rowApi.setEnabled(state)
@@ -240,6 +401,47 @@ function NierUI.makeRow(tab, text, desc, valueClass)
         end
         hovered = false
         paintRow()
+    end
+
+    -- Меню подключается САМИМ каркасом: виджету для этого ничего делать не надо,
+    -- и новый виджет получает правую кнопку просто потому, что строит строку.
+    --
+    -- КРОМЕ СТРОКИ С ПРИВЯЗКОЙ. Ядру надо вложить в её меню свои редакторы, а
+    -- привязки в этот момент ещё не существует -- мы внутри постройки виджета,
+    -- который её и заведёт. Такая строка зовёт rowApi.menu сама, одним
+    -- построителем на своё и на наше; заявка на правую кнопку одна, и спор за
+    -- неё не возникает.
+    --
+    -- Признаков три, потому что объявить привязку можно тремя способами:
+    -- Bind -- рубильник, Binds -- взаимодействия, bind -- готовая запись,
+    -- которую ядро подсовывает строке клавиши. Правило при этом одно.
+    local ownMenu = opts
+        and (opts.Bind ~= nil or opts.Binds ~= nil or opts.bind ~= nil)
+
+    if opts and opts.Menu and not ownMenu then
+        rowApi.menu(tab, opts.MenuTitle or text, opts.Menu, opts.MenuWidth)
+    end
+
+    --== НАСТРОЙКИ ТОЖЕ ПОДКЛЮЧАЕТ КАРКАС ====================================
+    --
+    -- Раньше это делал ТОЛЬКО переключатель, у себя в файле. Комментарий выше
+    -- уверял, что настройки положены любой строке, -- и это было неправдой:
+    -- Settings у ползунка, палитры, списка и поля ввода не работал вовсе, и
+    -- заметить это можно было лишь по тому, что ничего не происходит.
+    --
+    -- Состояние копируется в СВОЁ: править переданный spec нельзя, он может
+    -- быть общей на несколько строк таблицей.
+    --
+    -- Наружу оно уходит через воронку в containerIndex -- там, где известен
+    -- готовый handle. Виджету для этого делать не надо ничего, ровно как с меню.
+    if opts and opts.Settings then
+        local state = {}
+        for key, default in pairs(opts.Settings) do
+            state[key] = NierUI.settingDefault(default)
+        end
+        rowApi.settings(tab.window, opts.Text or text or "",
+            opts.Settings, state, opts.OnSetting)
+        tab.pendingSettings = { state = state, onChange = opts.OnSetting }
     end
 
     return row, label, value, invert, setHeld, rowApi

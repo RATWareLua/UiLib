@@ -18,8 +18,13 @@
 -- Исключение одно -- ползунок. По голому числу диапазон не угадать, поэтому
 -- ему нужна форма описания:
 --
---     Settings = { ЗНАЧЕНИЕ = { Type = "Slider", Default = 1000,
---                               Min = 1, Max = 999999, Step = 1 } }
+--     Settings = { ["ЗНАЧЕНИЕ"] = { Type = "Slider", Default = 1000,
+--                                   Min = 1, Max = 999999, Step = 1 } }
+--
+-- Русское имя настройки -- ТОЛЬКО через ["..."]. Ключ без скобок разбирается как
+-- идентификатор, а идентификаторы в Luau только из латиницы: { Цвет = ... } не
+-- компилируется вовсе. Имя настройки человек видит в окошке, поэтому русские
+-- имена тут дело обычное, и форма у них ровно такая.
 --
 -- В состоянии при этом лежит само число, а не описание: наружу и в профиль
 -- уходит значение.
@@ -47,36 +52,91 @@ function NierUI.settingDefault(value)
     return value
 end
 
--- window   -- окно, которому принадлежит всплывающее
--- anchor   -- от какого элемента отсчитывать положение
--- title    -- заголовок окошка
--- spec     -- ключ -> значение по умолчанию
--- state    -- ключ -> текущее значение (меняется на месте)
--- onChange -- function(key, value)
-function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
+-- ПАРАМЕТРЫ ТАБЛИЦЕЙ, А НЕ ПОЗИЦИЯМИ
+--
+-- Их стало восемь, и позиционный список из восьми штук читается только со
+-- счётом на пальцах -- а впереди ещё расширение меню правой кнопки, где их
+-- станет больше. Вызывающих всего двое, переучивать некого.
+--
+--   Anchor   -- от какого элемента отсчитывать положение
+--   Title    -- заголовок окошка
+--   Spec     -- ключ -> значение по умолчанию
+--   State    -- ключ -> текущее значение (меняется на месте)
+--   OnChange -- function(key, value)
+--   OnClose  -- зовётся, когда окно закрылось ЛЮБЫМ путём: щелчком мимо,
+--               Escape, повторной правой кнопкой или ClosePopups. Без него тот,
+--               кто держит ссылку на окно, считал бы его открытым вечно.
+--   Place    -- ключ памяти положения. ДОЛЖЕН ПЕРЕЖИВАТЬ САМ ЭЛЕМЕНТ: пункты
+--               списка пересобираются на каждую букву в поиске, и ключом по
+--               кнопке память терялась бы ровно тогда, когда она нужна.
+function NierUI.optionSettings(window, opts)
+    local spec, state = opts.Spec, opts.State
+    local anchor = opts.Anchor
+    local onChange = opts.OnChange
+
     local keys = {}
     for key in pairs(spec) do keys[#keys + 1] = key end
     table.sort(keys)
     if #keys == 0 then return end
 
-    local height = TOP + #keys * ROW + 8
-    local panel, close, conns, z = window:Popup({
-        Title = title,
+    -- ВЫСОТА ЗАЖИМАЕТСЯ ПО ЭКРАНУ, ОСТАЛЬНОЕ УХОДИТ В ПРОКРУТКУ.
+    --
+    -- Раньше она считалась как TOP + числом настроек, и только. Popup держит в
+    -- пределах экрана ПОЛОЖЕНИЕ, но не размер, поэтому два десятка настроек
+    -- давали окно выше экрана: нижние строки просто негде было показать, и
+    -- добраться до них было нечем.
+    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+        or Vector2.new(1920, 1080)
+
+    local content = #keys * ROW + 8
+    local room = math.max(ROW * 3, view.Y - 40 - TOP)
+    local height = TOP + math.min(content, room)
+
+    -- Взведённые захваты клавиши этого окна: строка -> чем отпустить.
+    --
+    -- Нужны здесь, а не в самой строке, потому что окно могут закрыть ПРЯМО ВО
+    -- ВРЕМЯ ожидания -- щелчком мимо, Escape, закрытием родителя. Подписки
+    -- строки уходят вместе с окном, и отпустить захват стало бы некому: признак
+    -- остался бы взведённым навсегда, а с ним перестали бы работать и клавиша
+    -- открытия меню, и все привязки разом.
+    local grabs = {}
+
+    local panel, close, conns, z, entry = window:Popup({
+        Title = opts.Title,
         Width = WIDTH,
         Height = height,
         X = anchor.AbsolutePosition.X + anchor.AbsoluteSize.X + 6,
         Y = anchor.AbsolutePosition.Y,
+        OnClose = function()
+            for _, release in pairs(grabs) do release() end
+            table.clear(grabs)
+            if opts.OnClose then opts.OnClose() end
+        end,
+        Place = opts.Place,
     })
 
+    -- Строки лежат в прокрутке, а не в самой панели: полоса заголовка обязана
+    -- остаться на месте, за неё окно таскают.
+    local body = U.new("ScrollingFrame", {
+        BackgroundTransparency = 1, BorderSizePixel = 0, Active = true,
+        Position = UDim2.fromOffset(0, TOP),
+        Size = UDim2.new(1, 0, 1, -TOP),
+        CanvasSize = UDim2.fromOffset(0, content),
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.Ink,
+        ScrollBarImageTransparency = 0.4,
+        ZIndex = z,
+    }, panel)
+
     for index, key in ipairs(keys) do
-        local y = TOP + (index - 1) * ROW
+        local y = (index - 1) * ROW
 
         local rowBtn = U.new("TextButton", {
             BackgroundColor3 = THEME.Ink, BackgroundTransparency = 1,
             BorderSizePixel = 0, AutoButtonColor = false, Text = "",
             Position = UDim2.fromOffset(0, y), Size = UDim2.new(1, 0, 0, ROW),
             ZIndex = z,
-        }, panel)
+        }, body)
 
         local label = U.new("TextLabel", {
             BackgroundTransparency = 1, Font = THEME.Font,
@@ -89,8 +149,16 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
         local descriptor = spec[key]
         local isSlider = type(descriptor) == "table" and descriptor.Type == "Slider"
 
+        -- ВИД СТРОКИ РЕШАЕТ ОБЪЯВЛЕНИЕ, А НЕ ТЕКУЩЕЕ ЗНАЧЕНИЕ.
+        --
+        -- Раньше ветка выбиралась по тому, что лежит в состоянии, -- и стоило
+        -- клавише оттуда пропасть, как настройка меняла тип на глазах: снятая
+        -- клавиша (false) превращала строку в переключатель. Тип объявлен один
+        -- раз и не меняется, значит и спрашивать надо объявление.
+        local declared = NierUI.settingDefault(descriptor)
+
         local current = state[key]
-        if current == nil then current = NierUI.settingDefault(descriptor) end
+        if current == nil then current = declared end
 
         if isSlider then
             local min = descriptor.Min or 0
@@ -194,7 +262,7 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 track.BackgroundColor3, fill.BackgroundColor3 = THEME.Ink, THEME.Ink
             end))
 
-        elseif typeof(current) == "Color3" then
+        elseif typeof(declared) == "Color3" then
             local swatch = U.new("Frame", {
                 BackgroundColor3 = current, BorderSizePixel = 0,
                 AnchorPoint = Vector2.new(1, 0.5),
@@ -229,6 +297,17 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                     Height = TOP + pad + field + NierUI.colorControlExtra + pad,
                     X = panel.AbsolutePosition.X + panel.AbsoluteSize.X + 6,
                     Y = rowBtn.AbsolutePosition.Y - 24,
+                    -- Палитра -- РЕБЁНОК этих настроек, и это не украшение:
+                    -- по родству решается, что закрывать щелчком. Щелчок в
+                    -- настройках убирает палитру, но не их самих; щелчок в
+                    -- палитре не трогает ничего; настройки соседнего пункта не
+                    -- задеваются ни тем ни другим.
+                    Owner = panel,
+                    -- Палитре память положения нужна ровно как и самим
+                    -- настройкам: её тоже отодвигают, чтобы видеть строку,
+                    -- которую красят. Ключ -- от родителя плюс имя поля, чтобы
+                    -- две палитры одного окна не делили одно место на двоих.
+                    Place = opts.Place and (opts.Place .. "\0c\0" .. tostring(key)) or nil,
                 })
 
                 NierUI.colorControl(pickPanel, {
@@ -245,12 +324,25 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 })
             end))
 
-        elseif typeof(current) == "EnumItem" then
+        elseif typeof(declared) == "EnumItem" then
+            -- СНЯТАЯ КЛАВИША ХРАНИТСЯ КАК false, А НЕ КАК nil.
+            --
+            -- nil означает «не задано», и такую настройку в профиле нечем
+            -- отличить от несохранённой: кодек её просто не увидит, а при
+            -- загрузке вернётся объявленное умолчание -- то есть снятая клавиша
+            -- воскресала бы на каждом запуске. false -- обычное значение, оно
+            -- переживает и JSON, и загрузку. Тот же приём, что и во всём
+            -- остальном состоянии библиотеки.
+            local function keyName()
+                local v = state[key]
+                return typeof(v) == "EnumItem" and v.Name or "NONE"
+            end
+
             -- Захват клавиши. Пока ждём нажатие, строка помечена и подсвечена:
             -- иначе непонятно, что окно чего-то ждёт.
             local value = U.new("TextLabel", {
                 BackgroundTransparency = 1, Font = THEME.Font,
-                Text = current.Name, TextColor3 = THEME.InkSoft,
+                Text = keyName(), TextColor3 = THEME.InkSoft,
                 TextSize = THEME.TextSize,
                 TextXAlignment = Enum.TextXAlignment.Right,
                 AnchorPoint = Vector2.new(1, 0),
@@ -258,6 +350,7 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 Size = UDim2.fromOffset(110, ROW), ZIndex = z + 1,
             }, rowBtn)
 
+            -- Чем отпустить ожидание. false -- не ждём ничего.
             local listening = false
 
             local function paint()
@@ -277,43 +370,56 @@ function NierUI.optionSettings(window, anchor, title, spec, state, onChange)
                 paint()
             end))
 
+            -- ЖДЁМ НАЖАТИЕ ЧУЖИМИ РУКАМИ.
+            --
+            -- Здесь стояла вторая копия этого танца -- взвести захват,
+            -- дождаться клавиши, отменить по Escape, применить со следующего
+            -- кадра, -- и она успела разойтись с первой: принимала только
+            -- Enum.KeyCode (то есть мышиную настройку молча превращала в
+            -- клавиатурную) и снимать привязку не умела вовсе.
+            --
+            -- Теперь ожидание одно на всю библиотеку и живёт в ядре (см. Binds).
+            -- Оттуда же пришло то, чего не было ни в одной копии: ждущий ВСЕГДА
+            -- ОДИН. Открыл настройки двух пунктов, щёлкнул клавишу в обоих --
+            -- прежнее ожидание отменяется, а не назначается вместе с новым.
             table.insert(conns, rowBtn.MouseButton1Click:Connect(function()
-                listening = true
+                if listening then return end
+                -- Пока ждём клавишу, Escape принадлежит НАМ: им отменяют
+                -- назначение. Без этой пометки одно нажатие делало две работы
+                -- разом -- отменяло захват и закрывало окно, -- и увидеть, что
+                -- отмена сработала, было уже негде.
+                entry.holdEscape = true
+
+                listening = window.binds:Capture(function(captured)
+                    listening = false
+                    grabs[rowBtn] = nil
+                    -- Отпускаем Escape СО СЛЕДУЮЩЕГО КАДРА: порядок обработчиков
+                    -- одного события в Roblox не определён, и сними мы пометку
+                    -- здесь, сторож окна прочитал бы её уже снятой и закрылся
+                    -- от того же самого нажатия.
+                    task.defer(function() entry.holdEscape = false end)
+
+                    -- Backspace приходит сюда как nil -- клавиши нет. Отмена по
+                    -- Escape сюда не доходит вовсе (см. Core.Capture), поэтому
+                    -- nil означает ровно снятие и ничего больше.
+                    --
+                    -- Раньше здесь стояло «применяем, только если не nil»: снять
+                    -- настройку было нельзя ничем, кроме правки кода, при том что
+                    -- Backspace честно обещал обратное.
+                    state[key] = captured or false
+
+                    value.Text = keyName()
+                    paint()
+
+                    if onChange then pcall(onChange, key, state[key]) end
+                end)
+
+                grabs[rowBtn] = listening
                 value.Text = "[ ... ]"
                 paint()
             end))
 
-            table.insert(conns, UserInputService.InputBegan:Connect(function(input, processed)
-                if not listening then return end
-                if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-
-                listening = false
-                -- Escape отменяет назначение, а не назначает Escape.
-                if input.KeyCode ~= Enum.KeyCode.Escape then
-                    state[key] = input.KeyCode
-
-                    -- НАЗНАЧЕНИЕ ВСТУПАЕТ В СИЛУ СО СЛЕДУЮЩЕГО КАДРА.
-                    --
-                    -- Нажатие, которым клавишу назначают, продолжает
-                    -- расходиться по остальным подписчикам этого же события.
-                    -- Сообщи мы о смене прямо здесь -- тот, кто на неё
-                    -- настраивает привязку, успел бы записать новую клавишу,
-                    -- и его собственный обработчик увидел бы совпадение с
-                    -- только что нажатой: фича включалась бы в момент бинда.
-                    --
-                    -- Полагаться на порядок обработчиков нельзя, он в Roblox
-                    -- не определён. Отложенный вызов снимает вопрос порядка
-                    -- целиком: к следующему кадру событие уже отработало.
-                    if onChange then
-                        local captured = input.KeyCode
-                        task.defer(function() pcall(onChange, key, captured) end)
-                    end
-                end
-                value.Text = (state[key] or spec[key]).Name
-                paint()
-            end))
-
-        elseif type(current) == "boolean" then
+        elseif type(declared) == "boolean" then
             local value = U.new("TextLabel", {
                 BackgroundTransparency = 1, Font = THEME.Font,
                 Text = current and "[ ON ]" or "[ OFF ]",

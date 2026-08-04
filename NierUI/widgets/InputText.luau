@@ -25,7 +25,8 @@ local THEME = NierUI.Theme
 local U = NierUI.util
 
 NierUI.widget("InputText", function(tab, opts)
-    local row, _, box, _, _, rowApi = NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox")
+    local row, _, box, _, _, rowApi =
+        NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox", opts)
 
     box.AutomaticSize = Enum.AutomaticSize.None
     box.Size = UDim2.new(opts.Width or 0.42, 0, 0, THEME.RowHeight)
@@ -42,22 +43,28 @@ NierUI.widget("InputText", function(tab, opts)
     local maxLength = opts.MaxLength
     local current = box.Text
 
-    table.insert(tab.window.conns, box:GetPropertyChangedSignal("Text"):Connect(function()
+    NierUI.connect(tab, box:GetPropertyChangedSignal("Text"), function()
         -- Обрезаем ПО ХОДУ набора, а не при завершении: иначе человек печатает,
         -- видит текст, а на выходе часть молча исчезает.
-        if maxLength and #box.Text > maxLength then
-            box.Text = box.Text:sub(1, maxLength)
+        --
+        -- В СИМВОЛАХ, А НЕ В БАЙТАХ. Здесь стояло #box.Text, и на кириллице
+        -- предел срабатывал вдвое раньше обещанного -- MaxLength = 24 давало
+        -- двенадцать букв, -- а на границе разрубал букву пополам: в поле
+        -- вылезал знак-заменитель. Ловилось прямо на переименовании привязки,
+        -- где поле как раз с пределом в 24.
+        if maxLength and (U.textLength(box.Text) or 0) > maxLength then
+            box.Text = U.textCut(box.Text, maxLength)
             return
         end
         if box.Text == current then return end
         current = box.Text
         if opts.Changed then pcall(opts.Changed, current) end
-    end))
+    end)
 
-    table.insert(tab.window.conns, box.FocusLost:Connect(function()
+    NierUI.connect(tab, box.FocusLost, function()
         current = box.Text
         if opts.Callback then pcall(opts.Callback, current) end
-    end))
+    end)
 
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
@@ -65,9 +72,24 @@ NierUI.widget("InputText", function(tab, opts)
         SetEnabled = function(_, on) rowApi.setEnabled(on) end,
         IsEnabled = function(_) return rowApi.isEnabled() end,
         Get = function(_) return box.Text end,
+
+        -- CHANGED -- ПРО НАБОР РУКАМИ, И ПРОГРАММНАЯ ПОДСТАНОВКА ЕГО НЕ ЗОВЁТ.
+        --
+        -- Раньше звала: присваивание в box.Text поднимает ту же подписку, что и
+        -- нажатие клавиши, и Set(текст, true) -- то самое «молча» -- честно
+        -- сообщал о наборе, которого не было. На этом уже спотыкался список
+        -- привязок: он ставит имя из профиля таким Set, а поле отвечало ему
+        -- «человек печатает».
+        --
+        -- Гасится это НЕ флагом: события в Roblox приходят отложенно, и снятый
+        -- сразу после присваивания флаг подписчик прочитал бы уже снятым.
+        -- Поэтому current ставится ВПЕРЁД -- подписка сравнивает с ним и выходит
+        -- первой же строкой.
         Set = function(_, text, silent)
-            box.Text = tostring(text or "")
-            current = box.Text
+            local value = tostring(text or "")
+            if maxLength then value = U.textCut(value, maxLength) end
+            current = value
+            box.Text = value
             if silent or not opts.Callback then return end
             pcall(opts.Callback, current)
         end,

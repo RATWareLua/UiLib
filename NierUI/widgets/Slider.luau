@@ -17,13 +17,19 @@ NierUI.widget("Slider", function(tab, opts)
     -- Значение сразу редактируемое: ползунком в 0.53 из 0.65 не попасть, при
     -- ста пикселях дорожки и диапазоне 0..1 один пиксель стоит целый сотый.
     local row, _, box, invert, _, rowApi =
-        NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox")
+        NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox", opts)
 
     local min = opts.Min or 0
     local max = opts.Max or 100
     local step = opts.Step or 1
     local suffix = opts.Suffix or ""
     local current = math.clamp(opts.Default or min, min, max)
+
+    -- Вырожденный диапазон -- не ошибка вызывающего, а обычное следствие
+    -- данных: Min и Max нередко считаются из чего-то, что в этот момент пусто.
+    -- Делить на него нельзя: (current-min)/(max-min) даёт nan, а nan в
+    -- UDim2.fromScale роняет отрисовку. Полоса при этом честно стоит пустой.
+    local span = (max > min) and (max - min) or 1
 
     -- Сколько знаков показывать -- выводим из шага, а не из значения: иначе
     -- 0.30000000000000004 попадало бы в подпись как есть.
@@ -66,7 +72,7 @@ NierUI.widget("Slider", function(tab, opts)
         if not editing then
             box.Text = format:format(current) .. suffix
         end
-        fill.Size = UDim2.fromScale((current - min) / (max - min), 1)
+        fill.Size = UDim2.fromScale((current - min) / span, 1)
     end
 
     local function commit(v, silent)
@@ -78,8 +84,17 @@ NierUI.widget("Slider", function(tab, opts)
 
     -- Перетаскивание: притягиваем к шагу. Дорожка -- это сто пикселей, точнее
     -- шага по ней всё равно не попасть.
+    --
+    -- СЕТКА ОТСЧИТЫВАЕТСЯ ОТ MIN, А НЕ ОТ НУЛЯ.
+    --
+    -- Раньше было floor(v/step + 0.5)*step -- сетка от нуля, независимо от
+    -- диапазона. При Min = 5, Step = 10 она давала 0, 10, 20: само значение 5,
+    -- с которого ползунок начинается, перетаскиванием было недостижимо, а левый
+    -- край дорожки после зажима прилипал к 5 и не двигался до середины. Любой
+    -- диапазон, чей Min не кратен шагу, вёл себя так же.
     local function set(v, silent)
-        commit(math.clamp(math.floor(v / step + 0.5) * step, min, max), silent)
+        commit(math.clamp(
+            min + math.floor((v - min) / step + 0.5) * step, min, max), silent)
     end
 
     -- НАБОР РУКАМИ: зажим ТОЛЬКО по диапазону, к шагу НЕ притягиваем.
@@ -123,19 +138,19 @@ NierUI.widget("Slider", function(tab, opts)
         return table.concat(out)
     end
 
-    table.insert(tab.window.conns, box:GetPropertyChangedSignal("Text"):Connect(function()
+    NierUI.connect(tab, box:GetPropertyChangedSignal("Text"), function()
         if not editing then return end
         local clean = sanitize(box.Text)
         if clean ~= box.Text then box.Text = clean end
-    end))
+    end)
 
-    table.insert(tab.window.conns, box.Focused:Connect(function()
+    NierUI.connect(tab, box.Focused, function()
         editing = true
         -- на время правки суффикс убираем: "0.65x" числом не разбирается
         box.Text = format:format(current)
-    end))
+    end)
 
-    table.insert(tab.window.conns, box.FocusLost:Connect(function()
+    NierUI.connect(tab, box.FocusLost, function()
         editing = false
         local typed = tonumber(box.Text)
         if typed then
@@ -143,13 +158,13 @@ NierUI.widget("Slider", function(tab, opts)
         else
             render()   -- пусто или мусор -- возвращаем прежнее
         end
-    end))
+    end)
 
     render()
 
     local sliding = false
 
-    table.insert(tab.window.conns, row.InputBegan:Connect(rowApi.gate(function(input)
+    NierUI.connect(tab, row.InputBegan, rowApi.gate(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
 
         -- Тянем, только если попали по дорожке. Иначе клик по названию строки
@@ -160,18 +175,18 @@ NierUI.widget("Slider", function(tab, opts)
         if x < left or x > right then return end
 
         sliding = true
-        set(min + (max - min) * U.alongX(track, x))
-    end)))
+        set(min + span * U.alongX(track, x))
+    end))
 
-    table.insert(tab.window.conns, UserInputService.InputChanged:Connect(function(input)
+    NierUI.connect(tab, UserInputService.InputChanged, function(input)
         if not sliding then return end
         if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        set(min + (max - min) * U.alongX(track, input.Position.X))
-    end))
+        set(min + span * U.alongX(track, input.Position.X))
+    end)
 
-    table.insert(tab.window.conns, UserInputService.InputEnded:Connect(function(input)
+    NierUI.connect(tab, UserInputService.InputEnded, function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = false end
-    end))
+    end)
 
     if opts.Enabled == false then rowApi.setEnabled(false) end
 
