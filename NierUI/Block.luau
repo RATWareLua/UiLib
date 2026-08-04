@@ -54,13 +54,15 @@ Block.__index = NierUI.containerIndex(Block)
 -- Разбор аргументов
 --=============================================================================
 
+-- Разбирается ТОЛЬКО строка: ось или заголовок. Здесь же собиралась четвёртая
+-- величина -- таблица «дополнительно», -- которую никто никогда не читал:
+-- Tab:Block забирал её в локальную и на этом всё. Пустое обещание в разборе
+-- аргументов хуже отсутствующего: снаружи оно выглядит настройкой.
 local function parseArgs(...)
-    local x, y, title, extra
+    local x, y, title
     for index = 1, select("#", ...) do
         local arg = select(index, ...)
-        if type(arg) == "table" then
-            extra = arg
-        elseif type(arg) == "string" then
+        if type(arg) == "string" then
             local word = arg:lower()
             if X_WORDS[word] then
                 if x then
@@ -79,7 +81,7 @@ local function parseArgs(...)
             end
         end
     end
-    return x, y, title, extra
+    return x, y, title
 end
 
 local function describe(block)
@@ -204,8 +206,10 @@ local COLS = { "Left", "Right" }
 -- сливаются в сплошную линию, а перпендикулярные пересекаются в центре. Узел
 -- замкнут по построению, а не подгонкой.
 local function drawSeparators(tab, final)
+    -- Без pcall с замыканием: Destroy на живом объекте не падает, а замыкание
+    -- заводилось бы на каждую линию при каждой пересборке раскладки.
     for _, spec in ipairs(tab.separators) do
-        pcall(function() spec.frame:Destroy() end)
+        spec.frame:Destroy()
     end
     table.clear(tab.separators)
     if not THEME.BlockSeparators then return end
@@ -361,7 +365,7 @@ end
 --=============================================================================
 
 function Tab:Block(...)
-    local x, y, title, extra = parseArgs(...)
+    local x, y, title = parseArgs(...)
 
     -- Нормализуем СРАЗУ, до всех сравнений. В блоке отсутствие оси хранится
     -- как false, и сравнение сырого nil с сохранённым false ложно -- на этом

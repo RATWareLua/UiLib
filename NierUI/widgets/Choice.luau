@@ -47,8 +47,7 @@ NierUI.widget("Radio", function(tab, opts)
 
     local function render(silent)
         for _, paint in ipairs(painters) do paint() end
-        if silent or not opts.Callback then return end
-        pcall(opts.Callback, current)
+        NierUI.fire(opts, silent, current)
     end
 
     for _, option in ipairs(options) do
@@ -121,13 +120,15 @@ NierUI.widget("Segmented", function(tab, opts)
 
     local function render(silent)
         for _, paint in ipairs(painters) do paint() end
-        if silent or not opts.Callback then return end
-        pcall(opts.Callback, current)
+        NierUI.fire(opts, silent, current)
     end
 
+    -- Строка перерисовалась -- перерисовываем сегменты, и ничего больше:
+    -- render(true) -- это ровно «пройтись по художникам молча». Свой цикл здесь
+    -- был вторым путём к тому же самому.
     rowApi.onPaint(function(hot)
         rowHot = hot
-        for _, paint in ipairs(painters) do paint() end
+        render(true)
     end)
 
     for index, option in ipairs(options) do
@@ -166,8 +167,6 @@ NierUI.widget("Segmented", function(tab, opts)
     end
 
     render(true)
-
-    if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
         Get = function(_) return current end,

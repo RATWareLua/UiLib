@@ -40,6 +40,11 @@
 local THEME = NierUI.Theme
 local U = NierUI.util
 
+-- Насколько далеко пускать поиск (см. U.matchScore). Таблица объявлена ОДИН раз
+-- на модуль, а не собирается при каждой постройке списка: она константа, а
+-- списков в меню бывает много.
+local SEARCH_LIMIT = { prefix = 0, word = 1, substring = 2, fuzzy = 3 }
+
 local function normalize(list)
     local entries = {}
     for _, item in ipairs(list or {}) do
@@ -88,7 +93,6 @@ local function build(tab, opts, multi)
     local source = normalize(opts.Options)
     local entries = source
     local query = ""
-    local open = false
 
     local chosen = {}
     local settings = {}
@@ -207,13 +211,15 @@ local function build(tab, opts, multi)
 
     NierUI.connect(tab, list:GetPropertyChangedSignal("CanvasPosition"), updateBar)
 
-    local function setOpen(state)
-        open = state
+    -- Флаг «раскрыт» и щелчок по строке держит каркас (см. NierUI.rowExpand):
+    -- та же связка у палитры, вместе со сторожем «щелчок пришёлся ВНУТРЬ
+    -- раскрытого блока -- строку не трогаем».
+    local setOpen = NierUI.rowExpand(tab, row, rowApi, panel, function(state)
         setPanel(state)
         if not state then list.CanvasPosition = Vector2.zero end
         setHeld(state)          -- шапка подсвечена, пока блок раскрыт
         updateBar()
-    end
+    end)
 
     --=========================================================================
     -- Пункты
@@ -233,8 +239,11 @@ local function build(tab, opts, multi)
     local itemConns = {}
 
     local function clearItems()
-        for _, c in ipairs(itemConns) do pcall(function() c:Disconnect() end) end
-        table.clear(itemConns)
+        -- Общим drain, а не своим циклом: приём «погасить сток и опустошить его»
+        -- один на всю библиотеку. Замыкания на каждую подписку он не заводит --
+        -- а здесь это важнее всего, список пересобирается на каждую букву в
+        -- строке поиска.
+        NierUI.drain(itemConns)
         table.clear(repaint)
         for _, child in ipairs(list:GetChildren()) do
             if child:IsA("TextButton") then
@@ -339,13 +348,13 @@ local function build(tab, opts, multi)
                 -- отметить пять штук, не открывая его пять раз.
                 chosen[key] = (not chosen[key]) or nil
                 render()
-                if opts.Callback then pcall(opts.Callback, picked()) end
+                NierUI.fire(opts, false, picked())
             else
                 table.clear(chosen)
                 chosen[key] = true
                 render()
                 setOpen(false)
-                if opts.Callback then pcall(opts.Callback, key) end
+                NierUI.fire(opts, false, key)
             end
         end))
 
@@ -404,9 +413,9 @@ local function build(tab, opts, multi)
     -- Фильтр -- это пересборка подмножества, то есть тот же rebuild, что и у
     -- динамического списка. Отдельного механизма не понадобилось.
 
-    -- Насколько далеко пускать: подпоследовательность («fuzzy») находит слишком
-    -- многое, поэтому по умолчанию отрезаем на подстроке.
-    local searchLimit = ({ prefix = 0, word = 1, substring = 2, fuzzy = 3 })[opts.Search] or 2
+    -- Подпоследовательность («fuzzy») находит слишком многое, поэтому по
+    -- умолчанию отрезаем на подстроке.
+    local searchLimit = SEARCH_LIMIT[opts.Search] or 2
 
     local function refilter()
         if query == "" then
@@ -497,14 +506,6 @@ local function build(tab, opts, multi)
 
     rebuild()
 
-    -- Та же защита, что у палитры: раскрытая панель лежит ВНУТРИ строки, и
-    -- щелчок по её пустому месту доходил бы до строки и схлопывал список.
-    -- Пункты -- кнопки и щелчок съедают сами, а вот поля вокруг них нет.
-    NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
-        if open and U.inside(panel, window.lastPress) then return end
-        setOpen(not open)
-    end))
-
     --=========================================================================
     -- Наружу
     --=========================================================================
@@ -576,7 +577,7 @@ local function build(tab, opts, multi)
             rowApi.setEnabled(on)
             -- Раскрытый список надо схлопнуть: иначе он останется висеть
             -- поверх соседних строк, а закрыть его будет уже нечем.
-            if not on and open then setOpen(false) end
+            if not on then setOpen(false) end
         end,
         IsEnabled = function(_) return rowApi.isEnabled() end,
     }
@@ -590,13 +591,8 @@ local function build(tab, opts, multi)
     -- неправду о происходящем.
     --
     -- Тишина по-прежнему доступна вторым аргументом -- ею пользуются, когда
-    -- значение ставят изнутри и обработчик уже отработал.
-    local function notify(value, silent)
-        if silent or not opts.Callback then return end
-        local ok, err = pcall(opts.Callback, value)
-        if not ok then warn("[NierUI] " .. tostring(opts.Text) .. ": " .. tostring(err)) end
-    end
-
+    -- значение ставят изнутри и обработчик уже отработал. Сам вызов -- общий
+    -- NierUI.fire: своя копия здесь была двенадцатой в библиотеке.
     if multi then
         -- Через переменную: picked отдаёт ДВА значения, и `return picked()`
         -- вернул бы вызывающему заодно и подписи -- второй ответ на вопрос,
@@ -611,7 +607,12 @@ local function build(tab, opts, multi)
             render()
             -- Наружу отдаём picked(), а не values: он идёт в порядке пунктов и
             -- не содержит ключей, которых в наборе нет.
-            notify(picked(), silent)
+            --
+            -- Через переменную -- по той же причине, что и в Get: picked отдаёт
+            -- ДВА значения, и подставленный прямо в вызов он донёс бы до
+            -- обработчика заодно и подписи.
+            local keys = picked()
+            NierUI.fire(opts, silent, keys)
         end
         api.Has = function(_, key) return chosen[key] == true end
     else
@@ -623,7 +624,7 @@ local function build(tab, opts, multi)
             table.clear(chosen)
             choose(v)
             render()
-            notify(v, silent)
+            NierUI.fire(opts, silent, v)
         end
     end
 

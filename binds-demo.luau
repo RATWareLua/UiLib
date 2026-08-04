@@ -268,9 +268,21 @@ api:Button({
 api:Button({
     Text = "ЛЕТАТЬ: ПЕРЕИМЕНОВАТЬ",
     Desc = "Личность привязки в Flag, поэтому подпись трогать можно.",
+    -- ЧЕРЕЗ if, А НЕ ЧЕРЕЗ and/or. Здесь стояло
+    --
+    --     bind:SetTitle(bind.titled and nil or "ПОЛЁТ ТАНКА")
+    --
+    -- и заводскую подпись кнопка не возвращала никогда: `X and nil` даёт nil, а
+    -- `nil or Y` возвращает Y -- то есть обе ветки давали одно и то же. Та же
+    -- ловушка, на которой библиотека уже горела трижды: у Backspace в захвате
+    -- клавиши, в GetSetting у списка и в воротах привязки.
     Callback = function()
         local bind = win.binds:Get("fly")
-        bind:SetTitle(bind.titled and nil or "ПОЛЁТ ТАНКА")
+        if bind.titled then
+            bind:SetTitle(nil)
+        else
+            bind:SetTitle("ПОЛЁТ ТАНКА")
+        end
     end,
 })
 

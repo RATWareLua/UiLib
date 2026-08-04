@@ -26,8 +26,7 @@ local BUTTON_H = 26
 function Window:Confirm(opts)
     opts = opts or {}
 
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
+    local view = NierUI.viewport()
 
     local text = tostring(opts.Text or "")
     -- Высоту прикидываем по длине текста: точную не узнать до отрисовки, а

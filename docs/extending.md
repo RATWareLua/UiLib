@@ -17,7 +17,7 @@ NierUI.widget("Stepper", function(tab, opts)
     NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
         current = current + 1
         render()
-        if opts.Callback then pcall(opts.Callback, current) end
+        NierUI.fire(opts, false, current)
     end))
 
     return NierUI.bind(tab, opts, {
@@ -25,13 +25,22 @@ NierUI.widget("Stepper", function(tab, opts)
         Set = function(_, v, silent)
             current = tonumber(v) or 0
             render()
-            if not silent and opts.Callback then pcall(opts.Callback, current) end
+            NierUI.fire(opts, silent, current)
         end,
         SetEnabled = function(_, on) rowApi.setEnabled(on) end,
         IsEnabled = function(_) return rowApi.isEnabled() end,
     })
 end)
 ```
+
+`NierUI.fire(opts, silent, ...)` — «позвать `Callback`, если не просили молчать».
+Писать это руками не нужно и вредно: копий приёма набралось двенадцать в семи
+файлах, и девять из них глотали ошибку чужого обработчика молча — он мог падать
+на каждый щелчок, а снаружи это выглядело как «строка не работает».
+
+**Второй аргумент `Set` везде значит `не звать Callback`** — и у вашего виджета
+обязан значить то же. Им пользуется загрузка профиля со строками `Apply = false`
+и всякий, кто ставит значение изнутри меню.
 
 Всё остальное он получает **даром, потому что он строка**: подсветку, метку,
 разделитель, недоступное состояние, меню правой кнопки, настройки, попадание в
@@ -74,6 +83,25 @@ rowApi.menu(tab, opts.Text, function(menu) NierUI.bindRows(menu, { bind }) end)
 
 `NierUI.makePanel(row, height)` даёт раскрывающийся блок под строкой — тот же,
 на котором стоят списки и палитра.
+
+## Общее уже написано — берите, а не повторяйте
+
+Каждая строка этой таблицы когда-то была копией в двух-двенадцати файлах, и
+копии успевали разойтись раньше, чем их замечали.
+
+| приём | вместо чего |
+|---|---|
+| `NierUI.fire(opts, silent, ...)` | своего `if not silent and opts.Callback` |
+| `NierUI.sink(container)` + `NierUI.connect` | записи подписок прямо в `window.conns` |
+| `NierUI.drain(list)` | цикла `Disconnect` + `table.clear` |
+| `NierUI.makeTrack(row, invert, толщина, тускло, тускло_под_курсором)` | своей дорожки с заливкой; на ней стоят ползунок и полоса выполнения |
+| `NierUI.rowExpand(container, row, rowApi, panel, apply)` | своей связки «раскрыть блок по щелчку»; сторож `lastPress` там же |
+| `NierUI.bindWatch(container, bind, что, fn)` | своей подписки на ядро привязок с разбором повода |
+| `NierUI.layers` | голых чисел `ZIndex`: очередь слоёв глобальна, и знать её надо целиком |
+| `NierUI.viewport()` | `workspace.CurrentCamera` с запасным `1920×1080` |
+
+Заводить своё имеет смысл ровно тогда, когда общее не подходит **по существу**,
+а не по мелочи: подходящее по мелочи чинится в одном месте и достаётся всем.
 
 **Виджет не знает, куда его кладут.** Ему нужны только `.page`, `.rows`,
 `.window` и `.conns` — а это есть у вкладки, блока, секции, колонки, меню правой

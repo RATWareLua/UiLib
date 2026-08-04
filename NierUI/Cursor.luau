@@ -63,10 +63,6 @@ local THEME = NierUI.Theme
 local U = NierUI.util
 local Window = NierUI.WindowClass
 
--- Поверх всего своего: у окна ZIndexBehavior = Sibling, число сравнивается
--- глобально, и всплывающие окна с их сотнями сюда не дотягиваются.
-local Z = 1000000
-
 --== размеры, В ФИЗИЧЕСКИХ ПИКСЕЛЯХ ==========================================
 
 local MARGIN = 1         -- оправа
@@ -97,6 +93,13 @@ NierUI.pixelStep = NierUI.pixelStep or 1
 --=============================================================================
 
 local function build(window)
+    -- Поверх всего своего: у окна ZIndexBehavior = Sibling, число сравнивается
+    -- глобально, и всплывающие окна с их сотнями сюда не дотягиваются.
+    --
+    -- Само число -- в общей таблице порядка слоёв (см. NierUI.layers в Util),
+    -- иначе оно жило бы в двух местах.
+    local Z = NierUI.layers.cursor
+
     -- Контейнер во весь экран: доли его детей считаются от размера экрана, и
     -- никакой арифметики с верхней панелью не нужно -- GetMouseLocation живёт
     -- в той же системе отсчёта.
@@ -305,9 +308,7 @@ function Window:HideCursor()
     if not self.cursorOn then return end
     self.cursorOn = false
 
-    for _, conn in ipairs(self.cursorConns or {}) do
-        pcall(function() conn:Disconnect() end)
-    end
+    if self.cursorConns then NierUI.drain(self.cursorConns) end
     self.cursorConns = false
 
     if self.cursor then self.cursor.Visible = false end

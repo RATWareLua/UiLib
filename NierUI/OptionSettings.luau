@@ -85,20 +85,21 @@ function NierUI.optionSettings(window, opts)
     -- пределах экрана ПОЛОЖЕНИЕ, но не размер, поэтому два десятка настроек
     -- давали окно выше экрана: нижние строки просто негде было показать, и
     -- добраться до них было нечем.
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
+    local view = NierUI.viewport()
 
     local content = #keys * ROW + 8
     local room = math.max(ROW * 3, view.Y - 40 - TOP)
     local height = TOP + math.min(content, room)
 
-    -- Взведённые захваты клавиши этого окна: строка -> чем отпустить.
+    -- Взведённые захваты клавиши этого окна: строка -> чем отпустить. Он же и
+    -- ответ на вопрос «ждёт ли эта строка клавишу»: второго признака у неё нет.
     --
     -- Нужны здесь, а не в самой строке, потому что окно могут закрыть ПРЯМО ВО
     -- ВРЕМЯ ожидания -- щелчком мимо, Escape, закрытием родителя. Подписки
-    -- строки уходят вместе с окном, и отпустить захват стало бы некому: признак
-    -- остался бы взведённым навсегда, а с ним перестали бы работать и клавиша
-    -- открытия меню, и все привязки разом.
+    -- строки уходят вместе с окном, и отпустить захват стало бы некому: core.grab
+    -- остался бы единицей навсегда, а с ним молчат ВСЕ привязки разом и клавиша
+    -- открытия меню -- она проверяет keyGrabbed первым делом. Ни ошибки, ни
+    -- следа в консоли.
     local grabs = {}
 
     local panel, close, conns, z, entry = window:Popup({
@@ -117,16 +118,12 @@ function NierUI.optionSettings(window, opts)
 
     -- Строки лежат в прокрутке, а не в самой панели: полоса заголовка обязана
     -- остаться на месте, за неё окно таскают.
-    local body = U.new("ScrollingFrame", {
-        BackgroundTransparency = 1, BorderSizePixel = 0, Active = true,
-        Position = UDim2.fromOffset(0, TOP),
-        Size = UDim2.new(1, 0, 1, -TOP),
-        CanvasSize = UDim2.fromOffset(0, content),
-        ScrollingDirection = Enum.ScrollingDirection.Y,
-        ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.Ink,
-        ScrollBarImageTransparency = 0.4,
-        ZIndex = z,
-    }, panel)
+    --
+    -- Холст задаём числом, а не считаем по содержимому: строки здесь стоят
+    -- смещением, а не раскладкой, и высота их известна заранее -- с запасом в
+    -- восемь пикселей, чтобы последняя не упиралась в край.
+    local body = NierUI.popupScroll(panel,
+        { Top = TOP, ZIndex = z, Active = true, Canvas = content })
 
     for index, key in ipairs(keys) do
         local y = (index - 1) * ROW
@@ -350,23 +347,34 @@ function NierUI.optionSettings(window, opts)
                 Size = UDim2.fromOffset(110, ROW), ZIndex = z + 1,
             }, rowBtn)
 
-            -- Чем отпустить ожидание. false -- не ждём ничего.
-            local listening = false
+            -- ЖДЁТ ЛИ ЭТА СТРОКА КЛАВИШУ -- ЗАПИСАНО В ОДНОМ МЕСТЕ, В grabs.
+            --
+            -- Здесь стояла вторая копия того же самого: локальная `listening` с
+            -- тем же значением, что и grabs[rowBtn], плюс поддельная подписка
+            -- `{ Disconnect = ... }` в conns окна, отпускавшая захват ещё раз.
+            -- Работало это лишь потому, что отмена ожидания идемпотентна: close
+            -- зовёт OnClose ПЕРЕД тем, как гасить conns, то есть grabs успевал
+            -- отпустить всё раньше, и поддельной подписке не доставалось ничего.
+            -- Два счетовода при одной записи -- это расхождение, ждущее случая.
+            local function waiting()
+                return grabs[rowBtn] ~= nil
+            end
 
             local function paint()
-                rowBtn.BackgroundTransparency = listening and 0 or 1
-                label.TextColor3 = listening and THEME.Bg or THEME.Ink
-                value.TextColor3 = listening and THEME.Bg or THEME.InkSoft
+                local on = waiting()
+                rowBtn.BackgroundTransparency = on and 0 or 1
+                label.TextColor3 = on and THEME.Bg or THEME.Ink
+                value.TextColor3 = on and THEME.Bg or THEME.InkSoft
             end
 
             table.insert(conns, rowBtn.MouseEnter:Connect(function()
-                if listening then return end
+                if waiting() then return end
                 rowBtn.BackgroundTransparency = 0
                 label.TextColor3 = THEME.Bg
                 value.TextColor3 = THEME.Bg
             end))
             table.insert(conns, rowBtn.MouseLeave:Connect(function()
-                if listening then return end
+                if waiting() then return end
                 paint()
             end))
 
@@ -383,15 +391,14 @@ function NierUI.optionSettings(window, opts)
             -- ОДИН. Открыл настройки двух пунктов, щёлкнул клавишу в обоих --
             -- прежнее ожидание отменяется, а не назначается вместе с новым.
             table.insert(conns, rowBtn.MouseButton1Click:Connect(function()
-                if listening then return end
+                if waiting() then return end
                 -- Пока ждём клавишу, Escape принадлежит НАМ: им отменяют
                 -- назначение. Без этой пометки одно нажатие делало две работы
                 -- разом -- отменяло захват и закрывало окно, -- и увидеть, что
                 -- отмена сработала, было уже негде.
                 entry.holdEscape = true
 
-                listening = window.binds:Capture(function(captured)
-                    listening = false
+                grabs[rowBtn] = window.binds:Capture(function(captured)
                     grabs[rowBtn] = nil
                     -- Отпускаем Escape СО СЛЕДУЮЩЕГО КАДРА: порядок обработчиков
                     -- одного события в Roblox не определён, и сними мы пометку
@@ -414,7 +421,6 @@ function NierUI.optionSettings(window, opts)
                     if onChange then pcall(onChange, key, state[key]) end
                 end)
 
-                grabs[rowBtn] = listening
                 value.Text = "[ ... ]"
                 paint()
             end))

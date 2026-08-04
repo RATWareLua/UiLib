@@ -59,6 +59,9 @@ local EXIT = TweenInfo.new(0.20, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 --=============================================================================
 
+-- Слой уведомлений выше любого всплывающего окна: сообщение обязано быть видно.
+-- Число берём у общей таблицы порядка слоёв (см. NierUI.layers в Util) -- здесь
+-- оно стояло голой двухсоткой, а знали о ней ещё два файла комментариями.
 local function ensureLayer(window)
     if window.notifyLayer then return window.notifyLayer end
 
@@ -67,7 +70,7 @@ local function ensureLayer(window)
         AnchorPoint = Vector2.new(1, 0),
         Position = UDim2.new(1, -EDGE, 0, EDGE),
         Size = UDim2.fromOffset(THEME.NotifyWidth, 0),
-        ZIndex = 200,
+        ZIndex = NierUI.layers.notify,
     }, window.gui)
 
     return window.notifyLayer
@@ -95,6 +98,7 @@ function Window:Notify(opts)
     local width = THEME.NotifyWidth
     local duration = tonumber(opts.Duration) or THEME.NotifyDuration
     local layer = ensureLayer(self)
+    local z = NierUI.layers.notify
 
     -- Стартовая позиция -- за краем экрана: слой отбит от края на EDGE, значит
     -- сдвиг на ширину плюс этот отступ выводит карточку ровно за экран.
@@ -104,7 +108,7 @@ function Window:Notify(opts)
         BackgroundColor3 = THEME.Bg, BorderSizePixel = 0, Active = false,
         Position = UDim2.fromOffset(offscreen, 0),
         Size = UDim2.fromOffset(width, 0),
-        ZIndex = 200, ClipsDescendants = true,
+        ZIndex = z, ClipsDescendants = true,
     }, layer)
     local line = U.stroke(card, 1)
 
@@ -117,7 +121,7 @@ function Window:Notify(opts)
             TextXAlignment = Enum.TextXAlignment.Left,
             TextTruncate = Enum.TextTruncate.AtEnd,
             Position = UDim2.fromOffset(PAD, top),
-            Size = UDim2.new(1, -PAD * 2, 0, 12), ZIndex = 201,
+            Size = UDim2.new(1, -PAD * 2, 0, 12), ZIndex = z + 1,
         }, card)
         top = top + 15
     end
@@ -130,7 +134,7 @@ function Window:Notify(opts)
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y,
         Position = UDim2.fromOffset(PAD, top),
-        Size = UDim2.new(1, -PAD * 2, 0, 0), ZIndex = 201,
+        Size = UDim2.new(1, -PAD * 2, 0, 0), ZIndex = z + 1,
     }, card)
 
     -- Полоска остатка: живёт ровно duration и убывает линейно, поэтому по ней
@@ -140,7 +144,7 @@ function Window:Notify(opts)
         BackgroundTransparency = 0.35,
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.fromScale(0, 1),
-        Size = UDim2.new(1, 0, 0, BAR), ZIndex = 202,
+        Size = UDim2.new(1, 0, 0, BAR), ZIndex = z + 2,
     }, card)
 
     -- abandon заполняется ниже: это способ для ClearNotifications погасить
@@ -192,9 +196,12 @@ function Window:Notify(opts)
         reflow(self)
     end
 
+    -- Через abandon, а не своим `gone = true`: пометка и снятие подписки на
+    -- высоту -- одно действие, и разводить его на два места значит однажды
+    -- взвести одно без другого. Ровно этим и болел ClearNotifications.
     local function dismiss()
         if gone then return end
-        gone = true
+        abandon()
         if not card.Parent then
             destroy()
             return

@@ -10,7 +10,7 @@
 
 local UserInputService = game:GetService("UserInputService")
 
-local THEME = NierUI.Theme
+-- THEME здесь больше не нужен: вся геометрия дорожки -- в каркасе строки.
 local U = NierUI.util
 
 NierUI.widget("Slider", function(tab, opts)
@@ -39,32 +39,11 @@ NierUI.widget("Slider", function(tab, opts)
     end
     local format = "%." .. decimals .. "f"
 
-    -- Дорожка слева от числа, обе по центру ПЕРВОЙ строки: строка может
-    -- вырасти, и центрирование по её высоте увело бы дорожку вниз.
-    -- Дорожка задана долями (см. Theme): правым краем на TrackRight, шириной
-    -- TrackFrac. Ограничитель держит её в разумных пределах -- на широкой
-    -- странице она не растягивается бесконечно, на узкой не схлопывается в
-    -- точку, по которой нечем попасть.
-    local track = U.new("Frame", {
-        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
-        BackgroundTransparency = 0.75, AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(THEME.TrackRight, 0, 0, math.floor(THEME.RowHeight / 2)),
-        Size = UDim2.new(THEME.TrackFrac, 0, 0, 2), ZIndex = 3,
-    }, row)
-    U.new("UISizeConstraint", {
-        MinSize = Vector2.new(36, 2), MaxSize = Vector2.new(110, 2),
-    }, track)
-
-    local fill = U.new("Frame", {
-        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
-        Size = UDim2.fromScale(0, 1),
-    }, track)
-
-    -- Дорожка и заливка тоже чернильные, значит под курсором должны стать
-    -- песочными -- иначе ползунок пропадает вместе с фоном строки.
-    invert(track, "BackgroundColor3", THEME.Bg, THEME.Ink)
-    invert(track, "BackgroundTransparency", 0.55, 0.75)
-    invert(fill, "BackgroundColor3", THEME.Bg, THEME.Ink)
+    -- Дорожка слева от числа. Геометрия, ограничитель и инверсия -- в каркасе
+    -- (см. NierUI.makeTrack): полоса выполнения строит ровно то же самое, и две
+    -- копии этих долей однажды разъехались бы. Своего здесь только толщина и то,
+    -- что под курсором дорожка светлеет: её, в отличие от полосы, тянут.
+    local track, fill = NierUI.makeTrack(row, invert, 2, 0.75, 0.55)
 
     local editing = false
 
@@ -78,8 +57,7 @@ NierUI.widget("Slider", function(tab, opts)
     local function commit(v, silent)
         current = v
         render()
-        if silent or not opts.Callback then return end
-        pcall(opts.Callback, current)
+        NierUI.fire(opts, silent, current)
     end
 
     -- Перетаскивание: притягиваем к шагу. Дорожка -- это сто пикселей, точнее
@@ -107,9 +85,9 @@ NierUI.widget("Slider", function(tab, opts)
     -- ползунка (Step = 1, знаков ноль) набранное 24.7 станет 25, а не осядет
     -- дробью там, где дробей быть не должно.
     local roundTo = 10 ^ decimals
-    local function setTyped(v)
+    local function setTyped(v, silent)
         local clamped = math.clamp(v, min, max)
-        commit(math.floor(clamped * roundTo + 0.5) / roundTo)
+        commit(math.floor(clamped * roundTo + 0.5) / roundTo, silent)
     end
 
     --== приём только чисел ==================================================
@@ -188,8 +166,6 @@ NierUI.widget("Slider", function(tab, opts)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = false end
     end)
 
-    if opts.Enabled == false then rowApi.setEnabled(false) end
-
     return NierUI.bind(tab, opts, {
         -- Set НЕ ПРИТЯГИВАЕТ К ШАГУ, как и набор руками.
         --
@@ -198,15 +174,12 @@ NierUI.widget("Slider", function(tab, opts)
         -- не перетаскивание, и притягивание там теряет данные: при шаге 1000
         -- сохранённые 65 возвращались как 0, а 500 -- как 1000. Значение,
         -- которое положили в профиль, обязано вернуться тем же.
-        Set = function(_, v, silent)
-            if silent then
-                local clamped = math.clamp(tonumber(v) or min, min, max)
-                current = math.floor(clamped * roundTo + 0.5) / roundTo
-                render()
-                return
-            end
-            setTyped(tonumber(v) or min)
-        end,
+        --
+        -- Тишина уходит вторым аргументом в тот же setTyped. Здесь стояла её
+        -- отдельная ветка -- зажать, округлить, перерисовать, -- то есть второй
+        -- путь к тому же самому: разойтись двум округлениям достаточно одной
+        -- правки в одном из них.
+        Set = function(_, v, silent) setTyped(tonumber(v) or min, silent) end,
         Get = function(_) return current end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)

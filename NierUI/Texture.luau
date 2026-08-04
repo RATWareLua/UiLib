@@ -174,10 +174,27 @@ end
 -- Поверхность
 --=============================================================================
 
+-- ПУСТО ЛИ ПОЛОТНО -- СПРАШИВАЕМ ПРО ВСЕ ТРИ СЛОЯ, А НЕ ПРО ДВА.
+--
+-- Здесь стояло «нет скан-линий и нет зерна -- рисовать нечего», и написано это
+-- было до того, как появилась миллиметровка. Выключи в теме скан-линии и зерно
+-- -- и сетка пропадала вместе с ними, хотя её никто не выключал: сама тема при
+-- этом честно держит GridStep = 8. Ни ошибки, ни следа -- просто чистая заливка
+-- вместо бумаги.
+--
+-- Условие обязано перечислять ровно те же слои, что рисует buildTile. Иначе это
+-- не проверка, а частный случай, отставший от кода на одну правку.
+local function tileEmpty()
+    if THEME.Scanlines then return false end
+    if THEME.Grain > 0 then return false end
+    if THEME.GridStep > 0 and THEME.GridAlpha > 0 then return false end
+    return true
+end
+
 -- parent -- на что натянуть, обычно корень окна или подложка блока.
 -- Возвращает созданный слой либо nil, если не получилось.
 function T.surface(parent)
-    if not THEME.Scanlines and THEME.Grain <= 0 then return nil end
+    if tileEmpty() then return nil end
 
     local ok, layer = pcall(function()
         local image = AssetService:CreateEditableImage({ Size = Vector2.new(TILE, TILE) })

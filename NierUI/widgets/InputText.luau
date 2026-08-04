@@ -25,20 +25,25 @@ local THEME = NierUI.Theme
 local U = NierUI.util
 
 NierUI.widget("InputText", function(tab, opts)
-    local row, _, box, _, _, rowApi =
-        NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox", opts)
+    -- ШИРИНУ ЗАДАЁТ КАРКАС, А НЕ МЫ ПОСЛЕ НЕГО.
+    --
+    -- Здесь стояла разборка только что построенного поля: погасить
+    -- AutomaticSize, переписать размер и СНЕСТИ ограничитель, который каркас
+    -- поставил строкой выше. Умолчание подсовываем подстановкой -- ровно как
+    -- список прячет от каркаса свой двухуровневый Settings: остальные поля
+    -- читаются через __index и остаются теми же самыми, а таблица вызывающего
+    -- не трогается.
+    local rowOpts = setmetatable({ Width = opts.Width or 0.42 },
+        { __index = opts })
 
-    box.AutomaticSize = Enum.AutomaticSize.None
-    box.Size = UDim2.new(opts.Width or 0.42, 0, 0, THEME.RowHeight)
-    box.ClearTextOnFocus = false
+    -- Сама строка полю не нужна: щелчок по ней ловит TextBox, а всё остальное
+    -- -- меню, настройки, доступность -- каркас делает сам.
+    local _, _, box, _, _, rowApi =
+        NierUI.makeRow(tab, opts.Text, opts.Desc, "TextBox", rowOpts)
+
     box.Text = tostring(opts.Default or "")
     box.PlaceholderText = tostring(opts.Placeholder or "")
     box.PlaceholderColor3 = THEME.InkSoft
-
-    -- Ограничитель ширины из каркаса рассчитан на короткое число; здесь он
-    -- только мешал бы доле.
-    local limit = box:FindFirstChildOfClass("UISizeConstraint")
-    if limit then limit:Destroy() end
 
     local maxLength = opts.MaxLength
     local current = box.Text
@@ -63,10 +68,8 @@ NierUI.widget("InputText", function(tab, opts)
 
     NierUI.connect(tab, box.FocusLost, function()
         current = box.Text
-        if opts.Callback then pcall(opts.Callback, current) end
+        NierUI.fire(opts, false, current)
     end)
-
-    if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
         SetEnabled = function(_, on) rowApi.setEnabled(on) end,
@@ -90,8 +93,7 @@ NierUI.widget("InputText", function(tab, opts)
             if maxLength then value = U.textCut(value, maxLength) end
             current = value
             box.Text = value
-            if silent or not opts.Callback then return end
-            pcall(opts.Callback, current)
+            NierUI.fire(opts, silent, current)
         end,
     })
 end)

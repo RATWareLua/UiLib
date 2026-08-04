@@ -38,6 +38,28 @@
 local THEME = NierUI.Theme
 local U = NierUI.util
 
+--=============================================================================
+-- ОБРАТНЫЙ ВЫЗОВ ВЫЗЫВАЮЩЕГО -- ОДНИМ МЕСТОМ НА ВСЕ ВИДЖЕТЫ
+--=============================================================================
+--
+-- Приём был скопирован дюжину раз по семи файлам: «молчим, если просили
+-- молчать; зовём под pcall, чтобы чужая ошибка не уронила меню». Копии успели
+-- разойтись в единственном, что в них есть: три ругались в консоль именем
+-- строки, остальные глотали ошибку молча -- то есть обработчик вызывающего мог
+-- падать на каждый щелчок, а снаружи это выглядело как «строка не работает».
+--
+-- silent -- тот самый второй аргумент Set во всей библиотеке. Он гасит
+-- обратный вызов ВЫЗЫВАЮЩЕГО и ничего больше: собственный вид строки рисуется
+-- в любом случае, иначе загрузка профиля меняла бы значения молча и меню врало
+-- бы до первого щелчка руками.
+function NierUI.fire(opts, silent, ...)
+    if silent or not opts.Callback then return end
+    local ok, err = pcall(opts.Callback, ...)
+    if not ok then
+        warn("[NierUI] " .. tostring(opts.Text or "?") .. ": " .. tostring(err))
+    end
+end
+
 -- valueClass -- "TextLabel" (по умолчанию) или "TextBox" для редактируемого
 -- значения. Раньше ползунок получал подпись, гасил её и рисовал поле рядом
 -- сам: в строке оставался мёртвый объект, а зарегистрированная на него
@@ -102,6 +124,16 @@ function NierUI.makeRow(tab, text, desc, valueClass, opts)
         -- дорожку ползунка. Растёт от правого края влево, поэтому число стоит
         -- на месте и не съезжает при наборе длинного значения. Нижний предел --
         -- чтобы в пустое поле было чем попасть.
+        --
+        -- ДОЛЯ ВМЕСТО РОСТА ПО СОДЕРЖИМОМУ -- ЭТО Width, И ОН ТОЖЕ ЗДЕСЬ.
+        --
+        -- У числа длина короткая и предсказуемая, у произвольного текста -- нет:
+        -- растущее поле уползало бы влево под подпись строки. Раньше это чинил у
+        -- себя сам виджет -- гасил AutomaticSize, переписывал размер и СНОСИЛ
+        -- ограничитель, поставленный каркасом строкой выше. Каркас, который
+        -- строит объект и тут же даёт его разобрать, -- не каркас; проще сразу
+        -- построить то, что просят.
+        local width = opts and opts.Width
         value = U.new("TextBox", {
             BackgroundTransparency = 1, Font = THEME.Font,
             Text = "", TextColor3 = THEME.InkSoft, TextSize = THEME.TextSize,
@@ -109,10 +141,16 @@ function NierUI.makeRow(tab, text, desc, valueClass, opts)
             TextEditable = true, ClearTextOnFocus = false,
             AnchorPoint = Vector2.new(1, 0),
             Position = UDim2.new(1, -10, 0, 0),
-            Size = UDim2.fromOffset(0, THEME.RowHeight),
-            AutomaticSize = Enum.AutomaticSize.X, ZIndex = 3,
+            Size = width and UDim2.new(width, 0, 0, THEME.RowHeight)
+                or UDim2.fromOffset(0, THEME.RowHeight),
+            AutomaticSize = width and Enum.AutomaticSize.None
+                or Enum.AutomaticSize.X,
+            ZIndex = 3,
         }, row)
-        U.new("UISizeConstraint", { MinSize = Vector2.new(22, THEME.RowHeight) }, value)
+        -- Ограничитель нужен только растущему полю: доля и так не схлопывается.
+        if not width then
+            U.new("UISizeConstraint", { MinSize = Vector2.new(22, THEME.RowHeight) }, value)
+        end
     else
         value = U.new("TextLabel", {
             BackgroundTransparency = 1, Font = THEME.Font,
@@ -165,7 +203,12 @@ function NierUI.makeRow(tab, text, desc, valueClass, opts)
     local function paintRow()
         local on = enabled and (hovered or held)
         U.tween(bg, { BackgroundTransparency = on and 0 or 1 })
-        for _, e in ipairs(inverts) do e.inst[e.prop] = on and e.on or e.off end
+        -- НЕ `on and e.on or e.off`: подписать можно ЛЮБОЕ свойство, в том числе
+        -- булево, и подписанный false молча превратился бы в «обычное» значение.
+        -- Ровно эта ловушка уже трижды стоила библиотеке поломки.
+        for _, e in ipairs(inverts) do
+            if on then e.inst[e.prop] = e.on else e.inst[e.prop] = e.off end
+        end
         marker.BackgroundTransparency = on and 0 or 1
 
         if not enabled then
@@ -444,7 +487,66 @@ function NierUI.makeRow(tab, text, desc, valueClass, opts)
         tab.pendingSettings = { state = state, onChange = opts.OnSetting }
     end
 
+    --== НЕДОСТУПНОСТЬ ОБЪЯВЛЕНИЕМ -- ТОЖЕ РАБОТА КАРКАСА ====================
+    --
+    -- `if opts.Enabled == false then rowApi.setEnabled(false) end` стояло
+    -- ПОСЛЕДНЕЙ строкой в восьми виджетах подряд: тот самый случай, когда каждый
+    -- доделывает за каркас одно и то же. И, как всякий переписанный по образцу
+    -- список, он оказался неполным -- у списка этой строки не было вовсе, и
+    -- Enabled = false у него не делал НИЧЕГО, при том что поле обещано всем
+    -- виджетам разом (см. docs/widgets.md).
+    --
+    -- Radio сюда не относится: он не строка, а несколько строк, и гасит их
+    -- перебором у себя.
+    if opts and opts.Enabled == false then rowApi.setEnabled(false) end
+
     return row, label, value, invert, setHeld, rowApi
+end
+
+--=============================================================================
+-- Дорожка с заливкой
+--=============================================================================
+--
+-- Одна геометрия на ползунок и на полосу выполнения, и это не совпадение, а
+-- требование: они стоят в соседних строках и обязаны быть вровень. Пока копий
+-- было две, «вровень» держалось на том, что обе правили одинаково, -- а долей в
+-- Theme четыре, и разъехаться им хватило бы одной невнимательной правки.
+--
+-- Дорожка задана долями (см. Theme): правым краем на TrackRight, шириной
+-- TrackFrac, по центру ПЕРВОЙ строки -- строка может вырасти, и центрирование
+-- по её высоте увело бы дорожку вниз.
+--
+-- Отличий у двух дорожек ровно два: толщина и то, светлеет ли она под курсором.
+-- invert строка отдаёт свой: дорожка нарисована чернилами, а под курсором
+-- строка заливается ими же -- без подписи на инверсию ползунок пропадал бы
+-- вместе с фоном (см. шапку файла).
+function NierUI.makeTrack(row, invert, thickness, dim, dimHot)
+    local track = U.new("Frame", {
+        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
+        BackgroundTransparency = dim, AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(THEME.TrackRight, 0, 0, math.floor(THEME.RowHeight / 2)),
+        Size = UDim2.new(THEME.TrackFrac, 0, 0, thickness), ZIndex = 3,
+    }, row)
+    -- Ограничитель держит дорожку в разумных пределах: на широкой странице она
+    -- не растягивается бесконечно, на узкой не схлопывается в точку, по которой
+    -- нечем попасть.
+    U.new("UISizeConstraint", {
+        MinSize = Vector2.new(36, thickness),
+        MaxSize = Vector2.new(110, thickness),
+    }, track)
+
+    local fill = U.new("Frame", {
+        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
+        Size = UDim2.fromScale(0, 1),
+    }, track)
+
+    invert(track, "BackgroundColor3", THEME.Bg, THEME.Ink)
+    invert(fill, "BackgroundColor3", THEME.Bg, THEME.Ink)
+    -- Полоса выполнения под курсором не светлеет: тянуть её нечем, и лишний
+    -- отклик обещал бы, что можно.
+    if dimHot then invert(track, "BackgroundTransparency", dimHot, dim) end
+
+    return track, fill
 end
 
 --=============================================================================
@@ -511,4 +613,43 @@ function NierUI.makePanel(row, height)
     end
 
     return panel, setOpen, setHeight
+end
+
+--=============================================================================
+-- Раскрытие блока щелчком по строке
+--=============================================================================
+--
+-- Одинаково у списка и у палитры -- вместе с тонкостью, которую порознь
+-- пришлось бы чинить дважды.
+--
+-- ЩЕЛЧОК ВНУТРИ РАСКРЫТОЙ ПАНЕЛИ НЕ СХЛОПЫВАЕТ СТРОКУ. Active = true на панели
+-- оказалось НЕ достаточно: панель лежит внутри самой строки, а не поверх неё, и
+-- нажатие по палитре всё равно доходило до строки-кнопки -- выбор цвета
+-- схлопывал палитру на отпускании. У списка то же самое: пункты -- кнопки и
+-- щелчок съедают сами, а поля вокруг них нет.
+--
+-- Однажды это чинил сторож «сейчас тянем»; потом его убрали, посчитав мёртвым
+-- по рассуждению, а не по замеру, -- и вернули поломку. Теперь проверка не про
+-- перетаскивание, а про МЕСТО: MouseButton1Click координат не несёт, поэтому
+-- окно помнит точку последнего нажатия. Это ловит и простой щелчок без
+-- движения, чего прежний сторож не умел.
+--
+-- apply(раскрыто) -- что делать при смене; сам флаг держит каркас. Наружу
+-- уходит setOpen, потому что закрывают блок не только щелчком: строку могли
+-- выключить, а у одиночного списка выбор пункта закрывает его сам.
+function NierUI.rowExpand(container, row, rowApi, panel, apply)
+    local window = container.window
+    local open = false
+
+    local function setOpen(state)
+        open = state
+        apply(state)
+    end
+
+    NierUI.connect(container, row.MouseButton1Click, rowApi.gate(function()
+        if open and U.inside(panel, window.lastPress) then return end
+        setOpen(not open)
+    end))
+
+    return setOpen
 end

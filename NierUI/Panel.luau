@@ -47,8 +47,6 @@
 -- знает, из чего меню собрано, а раскрывшийся внутри список меняет высоту уже
 -- после открытия. Поэтому меряем сами и пересчитываем по изменению.
 
-local UserInputService = game:GetService("UserInputService")
-
 local THEME = NierUI.Theme
 local U = NierUI.util
 
@@ -60,10 +58,11 @@ local WIDTH = 220
 local PAD = 6
 local EDGE = 40          -- сколько оставить по вертикали до края экрана
 
--- Постоянный слой: ВЫШЕ корня окна (1), но НИЖЕ всплывающих окон (100) и их
--- перехватчика (90). Счётчик кадров не должен закрывать собой меню, а меню --
--- прятаться за счётчиком.
-local HUD_Z = 50
+-- Постоянный слой: ВЫШЕ корня окна, но НИЖЕ всплывающих окон и их перехватчика.
+-- Счётчик кадров не должен закрывать собой меню, а меню -- прятаться за
+-- счётчиком. Числа здесь больше не повторяются: весь порядок слоёв объявлен
+-- одной таблицей, см. NierUI.layers в Util.
+local HUD_Z = NierUI.layers.hud
 
 --=============================================================================
 -- Геометрия
@@ -71,6 +70,15 @@ local HUD_Z = 50
 
 local function topOf(self)
     return self.titled and (THEME.PopupTitleHeight + 1) or 0
+end
+
+-- Держим слой в пределах экрана. Спрашивают двое -- показ и перестановка из
+-- профиля, -- и зажим у них обязан быть один: сохранённое с другого разрешения
+-- положение иначе вернуло бы слой за край, где его не видно и не поймать.
+local function clampToView(self, x, y)
+    local view = NierUI.viewport()
+    return math.clamp(math.floor(x or 0), 0, math.max(0, view.X - self.width)),
+           math.clamp(math.floor(y or 0), 0, math.max(0, view.Y - THEME.RowHeight))
 end
 
 -- Высота содержимого. AutomaticSize учитывает и UIPadding, поэтому отдельно
@@ -91,8 +99,7 @@ local function applyHeight(self)
     local panel = hostOf(self)
     if not panel then return end
 
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
+    local view = NierUI.viewport()
     local top = topOf(self)
     local room = math.max(THEME.RowHeight * 2, view.Y - EDGE - top)
     local height = top + math.min(self:Measure(), room)
@@ -115,22 +122,8 @@ end
 -- постоянный слой держал страницу в простом кадре: список из полутора десятков
 -- привязок обрывался на середине и не двигался.
 --
--- active -- поглощать ли ввод. Всплывающему это нужно (тянуть содержимое
--- пальцем), постоянному слою -- нельзя: его самого таскают мышью за пустое
--- место, а поглощающий потомок забрал бы у него нажатие целиком. Колесо
--- прокручивает и без этого.
-local function makeViewport(parent, top, z, active)
-    return U.new("ScrollingFrame", {
-        BackgroundTransparency = 1, BorderSizePixel = 0, Active = active,
-        Position = UDim2.fromOffset(0, top),
-        Size = UDim2.new(1, 0, 1, -top),
-        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        ScrollingDirection = Enum.ScrollingDirection.Y,
-        ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.Ink,
-        ScrollBarImageTransparency = 0.4,
-        ZIndex = z,
-    }, parent)
-end
+-- Само окно просмотра строит NierUI.popupScroll: у окна настроек пунктов оно
+-- третье такое же, и три копии десяти свойств прокрутки однажды разошлись бы.
 
 --=============================================================================
 
@@ -165,7 +158,7 @@ function NierUI.panel(window, opts)
         -- живут до конца окна. См. NierUI.sink.
         conns = {},
         park = park, width = width,
-        entry = false, close = false, viewport = false, titled = false,
+        entry = false, close = false, titled = false,
         -- Постоянный слой. Живёт параллельно всплывающему: контейнер либо
         -- всплывает, либо висит, но устроен одинаково.
         hud = false,
@@ -205,7 +198,7 @@ end
 -- закрытием родителя или ClosePopups.
 function Panel.Detach(self)
     if not self.entry then return end
-    self.entry, self.close, self.viewport = false, false, false
+    self.entry, self.close = false, false
     -- Страницу возвращаем на стоянку, а НЕ уничтожаем: в ней живут виджеты со
     -- своим состоянием, флагами и подписками.
     self.page.Parent = self.park
@@ -235,10 +228,10 @@ function Panel.Open(self, opts)
         end,
     })
 
-    local viewport = makeViewport(panel, top, z, true)
-
-    self.entry, self.close, self.viewport = entry, close, viewport
-    self.page.Parent = viewport
+    self.entry, self.close = entry, close
+    -- Active = true: содержимое всплывающего окна тянут пальцем, см. popupScroll.
+    self.page.Parent = NierUI.popupScroll(panel,
+        { Top = top, ZIndex = z, Active = true })
     applyHeight(self)
 
     return close
@@ -279,10 +272,7 @@ function Panel.Show(self, opts)
     self.titled = opts.Title ~= nil
     local top = topOf(self)
 
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
-    local x = math.clamp(opts.X or 20, 0, math.max(0, view.X - self.width))
-    local y = math.clamp(opts.Y or 20, 0, math.max(0, view.Y - THEME.RowHeight))
+    local x, y = clampToView(self, opts.X or 20, opts.Y or 20)
 
     local frame = U.new("Frame", {
         BackgroundColor3 = THEME.Bg, BorderSizePixel = 0, Active = true,
@@ -293,56 +283,21 @@ function Panel.Show(self, opts)
     }, self.window.gui)
     U.stroke(frame, 1)
 
-    if opts.Title then
-        U.new("TextLabel", {
-            BackgroundTransparency = 1, Font = THEME.Font,
-            Text = opts.Title, TextColor3 = THEME.InkSoft, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-            Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 12),
-            ZIndex = HUD_Z + 2,
-        }, frame)
-        U.new("Frame", {
-            BackgroundColor3 = THEME.Ink, BorderSizePixel = 0, Active = false,
-            BackgroundTransparency = 0.65,
-            Position = UDim2.fromOffset(0, THEME.PopupTitleHeight),
-            Size = UDim2.new(1, 0, 0, 1), ZIndex = HUD_Z + 2,
-        }, frame)
-    end
+    if opts.Title then NierUI.popupTitle(frame, opts.Title, HUD_Z + 2) end
 
-    local mount = makeViewport(frame, top, HUD_Z + 1, false)
-
-    self.hud, self.viewport = frame, mount
-    self.page.Parent = mount
+    self.hud = frame
+    -- Active = false: слой таскают мышью за пустое место, и поглощающий потомок
+    -- забрал бы у него нажатие целиком. См. popupScroll.
+    self.page.Parent = NierUI.popupScroll(frame,
+        { Top = top, ZIndex = HUD_Z + 1, Active = false })
     applyHeight(self)
 
     --== перетаскивание ======================================================
     --
-    -- За любое пустое место, а не только за полосу заголовка: у слоя её может и
-    -- не быть вовсе, а таскать его надо. Виджеты внутри щелчок съедают сами,
-    -- поэтому по ним слой не поедет.
-
-    local dragging, dragStart, startPos = false, nil, nil
-
-    NierUI.connect(self, frame.InputBegan, function(input)
-        if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-        dragging, dragStart, startPos = true, input.Position, frame.Position
-    end)
-
-    NierUI.connect(self, UserInputService.InputChanged, function(input)
-        if not dragging then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        local delta = input.Position - dragStart
-        -- Округляем: дробная позиция размазывает однопиксельные линии между
-        -- соседними пикселями, и рамка выглядит неровной.
-        frame.Position = UDim2.fromOffset(
-            math.floor(startPos.X.Offset + delta.X + 0.5),
-            math.floor(startPos.Y.Offset + delta.Y + 0.5))
-    end)
-
-    NierUI.connect(self, UserInputService.InputEnded, function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-    end)
+    -- За любое пустое место, а не только за полосу заголовка (то есть без Grip):
+    -- у слоя её может и не быть вовсе, а таскать его надо. Виджеты внутри щелчок
+    -- съедают сами, поэтому по ним слой не поедет.
+    NierUI.dragFrame(NierUI.sink(self), frame)
 
     return frame
 end
@@ -372,13 +327,7 @@ end
 
 function Panel.MoveTo(self, x, y)
     if not self.hud then return end
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
-    -- Зажимаем по экрану: сохранённое с другого разрешения положение иначе
-    -- вернуло бы слой за край, где его не видно и не поймать.
-    self.hud.Position = UDim2.fromOffset(
-        math.clamp(math.floor(x or 0), 0, math.max(0, view.X - self.width)),
-        math.clamp(math.floor(y or 0), 0, math.max(0, view.Y - THEME.RowHeight)))
+    self.hud.Position = UDim2.fromOffset(clampToView(self, x, y))
 end
 
 -- Снять контейнер целиком: и содержимое, и подписки. Открытое окно закрывается
@@ -392,8 +341,7 @@ function Panel.Destroy(self)
     self:Close()
     for _, fn in ipairs(self.cleanups) do pcall(fn) end
     table.clear(self.cleanups)
-    for _, conn in ipairs(self.conns) do pcall(function() conn:Disconnect() end) end
-    table.clear(self.conns)
+    NierUI.drain(self.conns)
     pcall(function() self.park:Destroy() end)
     if self.hud then
         pcall(function() self.hud:Destroy() end)

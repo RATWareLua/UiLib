@@ -17,7 +17,6 @@ local PANEL_HEIGHT = FIELD_HEIGHT + NierUI.colorControlExtra + 20
 NierUI.widget("ColorPicker", function(tab, opts)
     local row, _, value, invert, setHeld, rowApi =
         NierUI.makeRow(tab, opts.Text, opts.Desc, nil, opts)
-    local window = tab.window
 
     -- Образец встаёт по той же доле, что и дорожка ползунка (см. Theme):
     -- жёсткий отступ от правого края не пережил бы половинной ширины ячейки.
@@ -34,9 +33,21 @@ NierUI.widget("ColorPicker", function(tab, opts)
 
     local panel, setPanel = NierUI.makePanel(row, PANEL_HEIGHT)
 
+    -- ВИД СТРОКИ -- ОТДЕЛЬНО ОТ ОБРАТНОГО ВЫЗОВА.
+    --
+    -- Образец и код цвета рисовались прямо в обработчике, который уходит
+    -- наружу, а он гасится тишиной. Значит Set(цвет, true) -- загрузка профиля
+    -- у строки с Apply = false -- менял палитру внутри и НЕ менял ни квадрат, ни
+    -- подпись: строка показывала прежний цвет, а хранила новый. Тишина гасит
+    -- обратный вызов вызывающего, а не осведомлённость самого меню.
+    local function show(c)
+        swatch.BackgroundColor3 = c
+        value.Text = U.hex(c)
+    end
+
     local control = NierUI.colorControl(panel, {
         Position = UDim2.fromOffset(12, 10),
-        Width = 0, Height = FIELD_HEIGHT,
+        Height = FIELD_HEIGHT,
         Color = opts.Default,
         -- Палитра слушает мышь глобально и обязана уметь отключаться: сток
         -- берём у контейнера, а не у окна. Во временном контейнере эти две
@@ -44,52 +55,42 @@ NierUI.widget("ColorPicker", function(tab, opts)
         sink = NierUI.sink(tab),
         ZIndex = 30,
         Callback = function(c)
-            swatch.BackgroundColor3 = c
-            value.Text = U.hex(c)
-            if opts.Callback then pcall(opts.Callback, c) end
+            show(c)
+            NierUI.fire(opts, false, c)
         end,
     })
-    -- ширину контрол берёт от родителя, оставляем поля по краям; высоту не
-    -- трогаем -- он сам знает про свою HEX-строку
+    -- Ширину контрол берёт от родителя (Width ему не задан), оставляем поля по
+    -- краям; высоту не трогаем -- он сам знает про свою HEX-строку.
     control.instance.Size = UDim2.new(1, -24, 0, FIELD_HEIGHT + NierUI.colorControlExtra)
 
-    value.Text = U.hex(control.Get())
+    show(control.Get())
 
-    -- ЩЕЛЧОК ВНУТРИ РАСКРЫТОЙ ПАНЕЛИ НЕ ЗАКРЫВАЕТ СТРОКУ.
-    --
-    -- Active = true на панели и на квадрате оказалось НЕ достаточно: панель
-    -- лежит внутри самой строки, а не поверх неё, и нажатие по палитре всё
-    -- равно доходило до строки-кнопки. Выбор цвета схлопывал палитру на
-    -- отпускании -- ровно то, что уже чинили однажды сторожем «сейчас тянем».
-    --
-    -- Тот сторож я потом убрал, посчитав мёртвым по рассуждению, а не по
-    -- замеру, -- и вернул поломку. Теперь проверка не про перетаскивание, а
-    -- про место: MouseButton1Click координат не несёт, поэтому окно помнит
-    -- точку последнего нажатия. Это ловит и простой щелчок без движения, чего
-    -- прежний сторож не умел.
-    local open = false
-    NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
-        if open and U.inside(panel, window.lastPress) then return end
-        open = not open
-        setPanel(open)
-        setHeld(open)
-    end))
-
-    if opts.Enabled == false then rowApi.setEnabled(false) end
+    -- Раскрытие щелчком по строке -- в каркасе (см. NierUI.rowExpand), вместе
+    -- со сторожем «щелчок пришёлся ВНУТРЬ раскрытой палитры -- строку не
+    -- трогаем». Тот же самый, что у списка: держать его в двух местах значило
+    -- бы однажды починить одно и оставить второе.
+    local setOpen = NierUI.rowExpand(tab, row, rowApi, panel, function(state)
+        setPanel(state)
+        setHeld(state)
+    end)
 
     return NierUI.bind(tab, opts, {
         Get = function(_) return control.Get() end,
-        Set = function(_, c, silent) control.Set(c, silent) end,
+        -- Вид строки обновляем ВСЕГДА, даже когда просили молчать: см. show.
+        Set = function(_, c, silent)
+            control.Set(c, silent)
+            show(control.Get())
+        end,
         SetEnabled = function(_, on)
             rowApi.setEnabled(on)
             -- Образец цвета гасим вручную: он не текст, и общее приглушение
-            -- подписей до него не достаёт.
-            swatch.BackgroundTransparency = on and 0 or 0.6
-            if not on and open then
-                open = false
-                setPanel(false)
-                setHeld(false)
-            end
+            -- подписей до него не достаёт. Сравнение с false, а не просто
+            -- `on and ...`: доступность везде -- это `state ~= false`, и
+            -- SetEnabled() без аргумента строку ВКЛЮЧАЕТ.
+            swatch.BackgroundTransparency = on ~= false and 0 or 0.6
+            -- Раскрытую палитру схлопываем: иначе она останется висеть поверх
+            -- соседних строк, а закрыть её будет уже нечем.
+            if not on then setOpen(false) end
         end,
         IsEnabled = function(_) return rowApi.isEnabled() end,
     })

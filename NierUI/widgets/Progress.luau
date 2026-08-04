@@ -12,32 +12,16 @@
 -- заполнять -- дело вызывающего. Это осознанно, иначе полосе пришлось бы знать
 -- про источник данных, а библиотека такого не знает нигде.
 
-local THEME = NierUI.Theme
-local U = NierUI.util
+-- Ни THEME, ни util здесь больше не нужны: вся геометрия полосы -- в каркасе.
 
 NierUI.widget("Progress", function(tab, opts)
     local row, _, value, invert, _, rowApi =
         NierUI.makeRow(tab, opts.Text, opts.Desc, nil, opts)
 
-    -- Геометрия как у дорожки ползунка -- те же доли, поэтому полоса и ползунок
-    -- в соседних строках стоят вровень.
-    local track = U.new("Frame", {
-        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
-        BackgroundTransparency = 0.8, AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(THEME.TrackRight, 0, 0, math.floor(THEME.RowHeight / 2)),
-        Size = UDim2.new(THEME.TrackFrac, 0, 0, 4), ZIndex = 3,
-    }, row)
-    U.new("UISizeConstraint", {
-        MinSize = Vector2.new(36, 4), MaxSize = Vector2.new(110, 4),
-    }, track)
-
-    local fill = U.new("Frame", {
-        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0,
-        Size = UDim2.fromScale(0, 1),
-    }, track)
-
-    invert(track, "BackgroundColor3", THEME.Bg, THEME.Ink)
-    invert(fill, "BackgroundColor3", THEME.Bg, THEME.Ink)
+    -- Геометрия -- та же дорожка, что у ползунка (см. NierUI.makeTrack): те же
+    -- доли, поэтому полоса и ползунок в соседних строках стоят вровень. Своего
+    -- здесь только толщина: полосу не тянут, и под курсором она не светлеет.
+    local _, fill = NierUI.makeTrack(row, invert, 4, 0.8)
 
     local current = math.clamp(tonumber(opts.Default) or 0, 0, 1)
     local caption = nil
@@ -47,8 +31,6 @@ NierUI.widget("Progress", function(tab, opts)
         value.Text = caption or ("%d%%"):format(math.floor(current * 100 + 0.5))
     end
     render()
-
-    if opts.Enabled == false then rowApi.setEnabled(false) end
 
     return NierUI.bind(tab, opts, {
         Get = function(_) return current end,
@@ -83,7 +65,12 @@ NierUI.widget("Progress", function(tab, opts)
             rowApi.setEnabled(on)
             -- Заливка -- не текст, общее приглушение подписей до неё не
             -- достаёт; гасим отдельно, как образец у палитры.
-            fill.BackgroundTransparency = on and 0 or 0.6
+            --
+            -- Сравнение с false, а не просто `on and ...`: доступность во всей
+            -- библиотеке -- это `state ~= false`, то есть SetEnabled() без
+            -- аргумента ВКЛЮЧАЕТ строку. Здесь же nil гасил заливку -- строка
+            -- отзывалась, а выглядела выключенной.
+            fill.BackgroundTransparency = on ~= false and 0 or 0.6
         end,
         IsEnabled = function(_) return rowApi.isEnabled() end,
     })

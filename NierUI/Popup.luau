@@ -71,6 +71,11 @@ local TITLE_H = THEME.PopupTitleHeight
 
 local GAP = 6
 
+-- Порядок слоёв -- NierUI.layers, объявлен в Util. Размер экрана -- там же,
+-- NierUI.viewport(). И то и другое читают полдюжины файлов, часть из которых
+-- собирается РАНЬШЕ этого, -- значит место им в общем начале, а не здесь.
+local LAYERS = NierUI.layers
+
 --=============================================================================
 -- ПЕРЕХВАТЧИК ОДИН НА ВСЮ СТОПКУ, А НЕ ПО ОДНОМУ НА ОКНО
 --=============================================================================
@@ -84,16 +89,15 @@ local GAP = 6
 -- на что -- щелчки до него просто не доходят.
 --
 -- Работа у перехватчика ровно одна: не пускать щелчок в меню под стопкой.
--- Значит и слой ему нужен один, ниже любой панели. Панели начинаются со 100,
--- перехватчик стоит на 90 -- каждая из них выше него, и все они нажимаются.
-
-local SHADE_Z = 90
+-- Значит и слой ему нужен один, ниже любой панели. Панели начинаются с
+-- layers.popup, перехватчик стоит на layers.shade -- каждая из них выше него, и
+-- все они нажимаются.
 
 local function ensureShade(window)
     if window.popupShade then return end
     window.popupShade = U.new("TextButton", {
         BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
-        Size = UDim2.fromScale(1, 1), ZIndex = SHADE_Z, Name = U.randomName(),
+        Size = UDim2.fromScale(1, 1), ZIndex = LAYERS.shade, Name = U.randomName(),
     }, window.gui)
 end
 
@@ -101,6 +105,106 @@ local function dropShade(window)
     if not window.popupShade then return end
     pcall(function() window.popupShade:Destroy() end)
     window.popupShade = false
+end
+
+--=============================================================================
+-- ОДНА ПАНЕЛЬ НА ДВА СЛУЧАЯ: ВСПЛЫВАЮЩЕЕ ОКНО И ПОСТОЯННЫЙ СЛОЙ
+--=============================================================================
+--
+-- Постоянный слой (см. Panel.Show) -- это то же самое окно, только его никто не
+-- закрывает щелчком мимо. Полоса заголовка, окно просмотра и перетаскивание у
+-- них были написаны ДВАЖДЫ, слово в слово, и один раз уже разошлись: слой
+-- держал страницу в простом кадре, и список из полутора десятков привязок
+-- обрывался на середине и не двигался.
+--
+-- Поэтому три приёма ниже -- общие. Разница между окном и слоем остаётся ровно
+-- там, где она настоящая: кто создал кадр и что его закрывает.
+
+-- Полоса заголовка: подпись и черта под ней.
+function NierUI.popupTitle(parent, text, z)
+    U.new("TextLabel", {
+        BackgroundTransparency = 1, Font = THEME.Font,
+        Text = text, TextColor3 = THEME.InkSoft, TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 12),
+        ZIndex = z,
+    }, parent)
+    U.new("Frame", {
+        BackgroundColor3 = THEME.Ink, BorderSizePixel = 0, Active = false,
+        BackgroundTransparency = 0.65,
+        Position = UDim2.fromOffset(0, TITLE_H), Size = UDim2.new(1, 0, 0, 1),
+        ZIndex = z,
+    }, parent)
+end
+
+-- ОКНО ПРОСМОТРА ПРОКРУЧИВАЕТСЯ ВСЕГДА.
+--
+-- Высота панели зажата экраном, значит содержимое выше экрана обязано
+-- прокручиваться -- иначе оно просто обрезается по ClipsDescendants, и до нижних
+-- строк не добраться ничем.
+--
+--   Top     сколько отдать полосе заголовка;
+--   Active  поглощать ли ввод. Всплывающему это нужно (тянуть содержимое
+--             пальцем), постоянному слою -- нельзя: его самого таскают мышью за
+--             пустое место, а поглощающий потомок забрал бы у него нажатие
+--             целиком. Колесо прокручивает и без этого;
+--   Canvas  заданная высота холста; без неё считается по содержимому.
+function NierUI.popupScroll(parent, opts)
+    return U.new("ScrollingFrame", {
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        Active = opts.Active or false,
+        Position = UDim2.fromOffset(0, opts.Top),
+        Size = UDim2.new(1, 0, 1, -opts.Top),
+        CanvasSize = opts.Canvas and UDim2.fromOffset(0, opts.Canvas) or UDim2.new(),
+        AutomaticCanvasSize = opts.Canvas and Enum.AutomaticSize.None
+            or Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.Ink,
+        ScrollBarImageTransparency = 0.4,
+        ZIndex = opts.ZIndex,
+    }, parent)
+end
+
+-- ПЕРЕТАСКИВАНИЕ.
+--
+-- Всплывающее окно тянут за полосу заголовка, постоянный слой -- за любое
+-- пустое место: полосы у него может и не быть вовсе, а таскать его надо.
+-- Виджеты внутри щелчок съедают сами, поэтому по ним слой не поедет.
+--
+--   conns       куда сложить подписки: у окна свои, у слоя -- сток контейнера;
+--   Grip        сколько ВЕРХНИХ пикселей кадра считать ручкой. Без неё ручка --
+--                 весь кадр. Ниже полосы заголовка лежат строки настроек, и
+--                 таскать за них значило бы мешать нажатиям;
+--   OnMove(x,y) если положение надо запомнить.
+function NierUI.dragFrame(conns, frame, opts)
+    opts = opts or {}
+    local grip = opts.Grip or false
+    local onMove = opts.OnMove or false
+
+    local dragging, dragStart, startPos = false, nil, nil
+
+    table.insert(conns, frame.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if grip and input.Position.Y > frame.AbsolutePosition.Y + grip then return end
+        dragging, dragStart, startPos = true, input.Position, frame.Position
+    end))
+
+    table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = input.Position - dragStart
+        -- Округляем: дробная позиция размазывает однопиксельные линии между
+        -- соседними пикселями, и рамка начинает выглядеть неровной.
+        local x = math.floor(startPos.X.Offset + delta.X + 0.5)
+        local y = math.floor(startPos.Y.Offset + delta.Y + 0.5)
+        frame.Position = UDim2.fromOffset(x, y)
+        if onMove then onMove(x, y) end
+    end))
+
+    table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end))
 end
 
 --=============================================================================
@@ -165,20 +269,33 @@ end
 --=============================================================================
 
 -- Открыто ли entry из host -- по цепочке родителей.
+-- Шаг цепочки владельцев. «Владельца нет» хранится как false, и U.chain
+-- обрывается на нём наравне с nil.
+local function ownerOf(entry) return entry.owner end
+
 local function descends(entry, host)
-    local node = entry.owner
-    while node do
+    for node in U.chain(entry.owner, ownerOf) do
         if node == host then return true end
-        node = node.owner
     end
     return false
 end
 
-local function dismiss(window, point)
+-- Окно стопки, накрывающее точку. Последнее накрывающее и есть ВЕРХНЕЕ: окна
+-- лежат в порядке создания, позже созданное выше.
+--
+-- Спрашивают двое -- закрытие щелчком (здесь) и разбор правой кнопки (см.
+-- Context), -- и обход у них был дословно один и тот же. Ответ отдаём записью, а
+-- не панелью: Context спросит .panel сам, а обратно из панели в запись пути нет.
+function NierUI.popupAt(window, point)
     local host = false
     for _, entry in ipairs(window.popups) do
         if U.inside(entry.panel, point) then host = entry end
     end
+    return host
+end
+
+local function dismiss(window, point)
+    local host = NierUI.popupAt(window, point)
 
     for i = #window.popups, 1, -1 do
         local entry = window.popups[i]
@@ -192,8 +309,13 @@ end
 
 local function ensureDismiss(window)
     if window.popupInput then return end
+    -- ХОЗЯИН У ПОДПИСКИ ОДИН -- window.conns. Здесь же лежал ВТОРОЙ список с
+    -- теми же двумя коннектами, и читали его только затем, чтобы переложить их в
+    -- оконный сток; снять их через него не пытался никто. Поле осталось ровно
+    -- тем, чем и было по смыслу, -- пометкой «разбор уже стоит».
+    window.popupInput = true
 
-    window.popupInput = {
+    local conns = {
         UserInputService.InputEnded:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
             for _, entry in ipairs(window.popups) do entry.armed = true end
@@ -223,7 +345,7 @@ local function ensureDismiss(window)
 
     -- В window.conns: подписка живёт столько же, сколько окно, и гаснет в
     -- Destroy вместе со всем остальным.
-    for _, conn in ipairs(window.popupInput) do
+    for _, conn in ipairs(conns) do
         table.insert(window.conns, conn)
     end
 end
@@ -232,11 +354,11 @@ function Window:Popup(opts)
     opts = opts or {}
 
     -- Слой каждого следующего окна выше предыдущего, но не бесконечно: выше
-    -- 200 живут уведомления, и десяток открытых окон не должен их накрывать.
-    -- Упёршись в потолок, окна остаются на равных номерах, а порядок между
-    -- ними решает очерёдность создания -- позже созданное и так сверху.
+    -- живут уведомления (layers.notify), и десяток открытых окон не должен их
+    -- накрывать. Упёршись в потолок, окна остаются на равных номерах, а порядок
+    -- между ними решает очерёдность создания -- позже созданное и так сверху.
     local depth = math.min(#self.popups, 8)
-    local base = 100 + depth * 10
+    local base = LAYERS.popup + depth * 10
 
     local width = opts.Width or 200
     local height = opts.Height or 120
@@ -258,8 +380,7 @@ function Window:Popup(opts)
 
     -- Держим окно в пределах экрана: открытое у нижнего края меню иначе
     -- уезжает за экран целиком.
-    local view = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        or Vector2.new(1920, 1080)
+    local view = NierUI.viewport()
 
     --== где встать ==========================================================
     --
@@ -298,22 +419,7 @@ function Window:Popup(opts)
     }, layer)
     U.stroke(panel, 1)
 
-    if opts.Title then
-        U.new("TextLabel", {
-            BackgroundTransparency = 1, Font = THEME.Font,
-            Text = opts.Title, TextColor3 = THEME.InkSoft, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-            Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 12),
-            ZIndex = base + 2,
-        }, panel)
-        U.new("Frame", {
-            BackgroundColor3 = THEME.Ink, BorderSizePixel = 0, Active = false,
-            BackgroundTransparency = 0.65,
-            Position = UDim2.fromOffset(0, TITLE_H), Size = UDim2.new(1, 0, 0, 1),
-            ZIndex = base + 2,
-        }, panel)
-    end
+    if opts.Title then NierUI.popupTitle(panel, opts.Title, base + 2) end
 
     local conns = {}
     local closed = false
@@ -345,17 +451,16 @@ function Window:Popup(opts)
         -- больше нет ни строки, которую она красит, ни места, к которому она
         -- привязана. Оставшись одна, она висит сиротой и продолжает править
         -- настройку окна, которого уже нет.
+        -- Через descends, а не своим обходом: цепочка владельцев тут
+        -- перебиралась вторым, дословно повторяющим её экземпляром. Две копии
+        -- одного правила -- это два разных ответа на вопрос «чьё это окно»
+        -- через месяц.
         for i = #self.popups, 1, -1 do
             local other = self.popups[i]
-            local node = other.owner
-            while node do
-                if node == entry then pcall(other.close) break end
-                node = node.owner
-            end
+            if descends(other, entry) then pcall(other.close) end
         end
 
-        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-        table.clear(conns)
+        NierUI.drain(conns)
         pcall(function() layer:Destroy() end)
         for i = #self.popups, 1, -1 do
             if self.popups[i].close == close then table.remove(self.popups, i) end
@@ -388,38 +493,20 @@ function Window:Popup(opts)
 
     --== перетаскивание ======================================================
     --
-    -- За полосу заголовка. Ниже неё лежат строки настроек, и таскать за них
-    -- значило бы мешать нажатиям.
+    -- За полосу заголовка -- отсюда Grip. Сам приём общий с постоянным слоем,
+    -- см. NierUI.dragFrame.
 
-    local dragging, dragStart, startPos = false, nil, nil
-
-    table.insert(conns, panel.InputBegan:Connect(function(input)
-        if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-        if input.Position.Y > panel.AbsolutePosition.Y + TITLE_H then return end
-        dragging, dragStart, startPos = true, input.Position, panel.Position
-    end))
-
-    table.insert(conns, UserInputService.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        local delta = input.Position - dragStart
-        -- Округляем: дробная позиция размазывает однопиксельные линии между
-        -- соседними пикселями, и рамка начинает выглядеть неровной.
-        local nx = math.floor(startPos.X.Offset + delta.X + 0.5)
-        local ny = math.floor(startPos.Y.Offset + delta.Y + 0.5)
-        panel.Position = UDim2.fromOffset(nx, ny)
-
-        -- Запоминаем сразу, а не по отпусканию: до отпускания дело может и не
-        -- дойти -- окно закроют щелчком мимо прямо во время перетаскивания, и
-        -- тогда оно вернулось бы на прежнее место, будто его и не двигали.
-        if opts.Place then
+    -- Запоминаем сразу, а не по отпусканию: до отпускания дело может и не
+    -- дойти -- окно закроют щелчком мимо прямо во время перетаскивания, и
+    -- тогда оно вернулось бы на прежнее место, будто его и не двигали.
+    local remember = false
+    if opts.Place then
+        remember = function(nx, ny)
             self.popupPlaces[opts.Place] = Vector2.new(nx, ny)
         end
-    end))
+    end
 
-    table.insert(conns, UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-    end))
+    NierUI.dragFrame(conns, panel, { Grip = TITLE_H, OnMove = remember })
 
     return panel, close, conns, base + 2, entry
 end

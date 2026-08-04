@@ -39,10 +39,7 @@ NierUI.widget("Toggle", function(tab, opts)
             for _, bind in ipairs(gated) do bind:Shut() end
         end
 
-        if not silent and opts.Callback then
-            local ok, err = pcall(opts.Callback, state)
-            if not ok then warn("[NierUI] " .. tostring(opts.Text) .. ": " .. tostring(err)) end
-        end
+        NierUI.fire(opts, silent, state)
 
         -- СООБЩАЕМ ПОСЛЕ ОБРАТНОГО ВЫЗОВА, А НЕ ДО.
         --
@@ -64,8 +61,6 @@ NierUI.widget("Toggle", function(tab, opts)
         set(not state)
     end))
 
-    if opts.Enabled == false then rowApi.setEnabled(false) end
-
     --== ПРИВЯЗКИ ============================================================
     --
     --     Bind  = true | Enum.KeyCode.F      РУБИЛЬНИК: переключает эту строку
@@ -85,12 +80,11 @@ NierUI.widget("Toggle", function(tab, opts)
         end
     end
 
-    local bind
     if opts.Bind ~= nil then
         -- Состояния ядру НЕ ОТДАЁМ -- отдаём пару функций до него. set здесь тот
         -- же самый, что зовёт щелчок мышью, поэтому нажатие клавиши и щелчок по
         -- строке буквально неразличимы: один код, одно уведомление, одна правда.
-        bind = tab.window.binds:Add({
+        all[#all + 1] = tab.window.binds:Add({
             Flag = opts.Flag, Kind = opts.Kind, Enabled = opts.Enabled,
             ChangeModeInGame = opts.ChangeModeInGame,
             Key = typeof(opts.Bind) == "EnumItem" and opts.Bind or nil,
@@ -98,22 +92,32 @@ NierUI.widget("Toggle", function(tab, opts)
             get = function() return state end,
             set = function(on) set(on) end,
         })
-        all[#all + 1] = bind
     end
 
+    --== СПИСКА ПОЛЕЙ ЗДЕСЬ БОЛЬШЕ НЕТ =======================================
+    --
+    -- Стояло переписывание по именам: Text, Flag, Key, Kind, Enabled, Toggle,
+    -- Action, ChangeModeInGame. То есть ровно тот слой перевода, которого, как
+    -- сказано в шапке Binds, «нет нигде», -- и вёл он себя как положено слою
+    -- перевода: новое поле ядра надо было не забыть дописать сюда.
+    --
+    -- Забыли на первом же. State доезжал через win:Bind и терялся МОЛЧА у
+    -- привязки, объявленной на строке: ядро не видело его вовсе и заводило
+    -- привязке своё состояние. Внешне -- та самая ложь, ради которой State и
+    -- заводился: [ON] при пустом захвате.
+    --
+    -- Копия, а не сама spec: таблицу дал вызывающий, и дописывать в неё своё
+    -- значит однажды вернуть ему её изменённой.
     for _, spec in ipairs(opts.Binds or {}) do
-        local extra = tab.window.binds:Add({
-            Text = spec.Text, Flag = spec.Flag, Key = spec.Key, Kind = spec.Kind,
-            Enabled = spec.Enabled, Toggle = spec.Toggle, Action = spec.Action,
-            ChangeModeInGame = spec.ChangeModeInGame,
-            -- Подпись собирается из двух: строчной и своей. Своей нет --
-            -- останется строчная, и это верно: одна привязка на строке и есть
-            -- эта строка.
-            row = row, rowTitle = opts.Text,
-            -- ВОРОТА -- состояние строки, читается КАЖДЫЙ раз. Копией здесь
-            -- была бы вторая правда о том же факте.
-            gate = function() return state end,
-        })
+        local decl = table.clone(spec)
+        -- Подпись собирается из двух: строчной и своей. Своей нет -- останется
+        -- строчная, и это верно: одна привязка на строке и есть эта строка.
+        decl.row, decl.rowTitle = row, opts.Text
+        -- ВОРОТА -- состояние строки, читается КАЖДЫЙ раз. Копией здесь была бы
+        -- вторая правда о том же факте.
+        decl.gate = function() return state end
+
+        local extra = tab.window.binds:Add(decl)
         all[#all + 1] = extra
         gated[#gated + 1] = extra
     end
@@ -178,12 +182,8 @@ NierUI.widget("Button", function(tab, opts)
     value.Text = opts.Value or ">"
 
     NierUI.connect(tab, row.MouseButton1Click, rowApi.gate(function()
-        if not opts.Callback then return end
-        local ok, err = pcall(opts.Callback)
-        if not ok then warn("[NierUI] " .. tostring(opts.Text) .. ": " .. tostring(err)) end
+        NierUI.fire(opts, false)
     end))
-
-    if opts.Enabled == false then rowApi.setEnabled(false) end
 
     -- ПРИВЯЗКА У КНОПКИ -- ДЕЙСТВИЕ. Состояния у неё нет и быть не может:
     -- нажали -- сработало, удерживать и переключать нечего. В списке привязок

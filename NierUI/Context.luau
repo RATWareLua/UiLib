@@ -87,6 +87,10 @@ end
 -- Попадание
 --=============================================================================
 
+-- Шаг цепочки. Объявлен один раз на модуль, а не создаётся при каждом подъёме:
+-- попадание считается на каждый щелчок правой кнопкой.
+local function parentOf(node) return node.Parent end
+
 local function reachable(target, point)
     local frame = target.frame
     if not U.inside(frame, point) then return false end
@@ -95,8 +99,7 @@ local function reachable(target, point)
         return false
     end
 
-    local node = frame
-    while node do
+    for node in U.chain(frame, parentOf) do
         if not node:IsA("GuiObject") then break end
         if not node.Visible then return false end
         -- ScrollingFrame режет содержимое сам по себе, флага у него для этого
@@ -104,7 +107,6 @@ local function reachable(target, point)
         if node.ClipsDescendants or node:IsA("ScrollingFrame") then
             if not U.inside(node, point) then return false end
         end
-        node = node.Parent
     end
     return true
 end
@@ -112,12 +114,13 @@ end
 -- Глубина в дереве. Вложенный элемент выигрывает у того, внутри которого он
 -- лежит: пункт списка лежит в раскрытой панели, панель -- в строке, и обе
 -- накрывают точку. Правая кнопка предназначалась пункту.
+--
+-- Глубина -- это ЧИСЛО ПРЕДКОВ, поэтому и считается перебором предков, начиная
+-- с родителя. Прежний `while node and node.Parent` давал то же число окольным
+-- путём: шагал по самому элементу и останавливался, не дойдя до корня.
 local function depthOf(frame)
-    local depth, node = 0, frame
-    while node and node.Parent do
-        depth = depth + 1
-        node = node.Parent
-    end
+    local depth = 0
+    for _ in U.chain(frame.Parent, parentOf) do depth = depth + 1 end
     return depth
 end
 
@@ -127,12 +130,11 @@ end
 
 function NierUI.contextDispatch(window, point)
     -- Точка внутри открытого окна принадлежит ЕМУ, а не тому, что лежит под
-    -- ним: окно непрозрачно, и строка под ним не видна. Последнее накрывающее в
-    -- стопке -- верхнее.
-    local host = false
-    for _, entry in ipairs(window.popups) do
-        if U.inside(entry.panel, point) then host = entry.panel end
-    end
+    -- ним: окно непрозрачно, и строка под ним не видна. Кто именно накрыл --
+    -- считает Popup: у закрытия щелчком мимо вопрос тот же самый, и обход стопки
+    -- был написан здесь вторым, дословным экземпляром.
+    local top = NierUI.popupAt(window, point)
+    local host = top and top.panel or false
 
     local best, bestDepth = nil, -1
     for i = #window.m2, 1, -1 do

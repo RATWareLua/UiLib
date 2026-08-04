@@ -75,12 +75,24 @@
 -- этом тот же самый, что зовёт щелчок мышью, поэтому нажатие клавиши и щелчок
 -- по строке буквально неразличимы -- один код, одно уведомление, одна правда.
 --
--- У взаимодействия с Toggle другого хозяина этому «включено» нет, и хранит его
+-- У взаимодействия с Toggle хозяина этому «включено» обычно нет, и хранит его
 -- сама запись. Скрипту уходит вызов Toggle(on); он ничего не хранит.
 --
+-- ОБЫЧНО -- НО НЕ ВСЕГДА, И ЭТО НЕ РЕДКИЙ СЛУЧАЙ. Бывает, что состояние держит
+-- сама фича, потому что оно ей и принадлежит: захват цели либо состоялся, либо
+-- нет, и решает это не нажатие, а то, есть ли кого захватывать. Такое состояние
+-- ещё и пропадает БЕЗ КЛАВИШИ -- цель умерла, ушла за дистанцию, сменился
+-- раунд. Тогда скриптер даёт State -- вопрос к настоящему хозяину, -- и запись
+-- не хранит ничего, а спрашивает.
+--
+-- Хранящая копия в таком случае -- это ложь по построению, и врёт она с первого
+-- же нажатия: Toggle(true) записывал «включено» ДО того, как выяснится, что
+-- включать было нечего. На экране горело [ON] при пустом захвате.
+--
 -- Отсюда правило про уведомления: о смене сообщает ВЛАДЕЛЕЦ. Строка сообщает
--- сама, через NierUI.stateChanged; за своё состояние отвечает ядро и сообщает
--- тоже само. Двух сообщений об одной смене не бывает: хозяин всегда один.
+-- сама, через NierUI.stateChanged; своё состояние ядро хранит и сообщает тоже
+-- само; чужое сообщает тот, чьё оно, -- вызовом Sync. Двух сообщений об одной
+-- смене не бывает: хозяин всегда один.
 --
 --
 -- ОДНА ПРИВЯЗКА НА СТРОКЕ -- ПРОДОЛЖЕНИЕ СТРОКИ, НЕСКОЛЬКО -- СВОИ ЛЮДИ
@@ -120,12 +132,27 @@ local UserInputService = game:GetService("UserInputService")
 -- вот прежний редактор принимал только Enum.KeyCode и молча превращал мышиную
 -- настройку в клавиатурную.
 --
--- ЛЕВАЯ КНОПКА НЕ ПРИВЯЗЫВАЕТСЯ. Ею открывают само ожидание, ею же водят по
--- меню и таскают окна: привязка на неё сделала бы меню неуправляемым, а снять
--- её было бы нечем -- пришлось бы попасть по строке той же кнопкой, которая в
--- этот момент срабатывает.
+-- ЛЕВАЯ КНОПКА ПРИВЯЗЫВАЕТСЯ, НО НЕ СРАБАТЫВАЕТ ПРИ ОТКРЫТОМ МЕНЮ.
+--
+-- Раньше она была запрещена совсем, и довод был: ею открывают само ожидание, ею
+-- же водят по меню и таскают окна -- привязка на неё сделала бы меню
+-- неуправляемым, а снять её было бы нечем, пришлось бы попасть по строке той же
+-- кнопкой, которая в этот момент срабатывает.
+--
+-- Довод верен ровно наполовину: весь конфликт живёт, ПОКА МЕНЮ ОТКРЫТО. Закрыто
+-- -- и левая кнопка такая же клавиша, как любая другая, а в играх она главная:
+-- на ней удар, выстрел, зарядка броска. Запрещать привязку на самое нужное
+-- ради состояния, в котором привязки и так не нужны, -- плохой размен.
+--
+-- Поэтому запрет сузился до одного правила: при открытом меню нажатие левой
+-- кнопки привязке не достаётся (см. ensureInput). Меню остаётся управляемым,
+-- по строке можно попасть, и снять привязку есть чем.
+--
+-- Отпускание при этом проходит ВСЕГДА -- иначе ЗАЖАТИЕ, начатое до открытия
+-- меню, осталось бы включённым навсегда.
 
 local MOUSE = {
+    [Enum.UserInputType.MouseButton1] = true,
     [Enum.UserInputType.MouseButton2] = true,
     [Enum.UserInputType.MouseButton3] = true,
 }
@@ -151,6 +178,17 @@ Bind.__index = Bind
 local Core = {}
 Core.__index = Core
 
+-- ВЫЧЕРКНУТЬ ИЗ МАССИВА. Обход С КОНЦА, а не с начала: table.remove сдвигает
+-- хвост, и прямой проход перескочил бы через соседа вычеркнутого.
+--
+-- Тремя копиями это лежало в трёх местах разом -- индекс по клавише, список
+-- подписчиков, реестр привязок, -- и во всех трёх ошибиться можно одинаково.
+local function drop(list, item)
+    for i = #list, 1, -1 do
+        if list[i] == item then table.remove(list, i) end
+    end
+end
+
 --== индекс по клавише =======================================================
 --
 -- Массив, а не одна запись: две привязки на одну клавишу -- не ошибка, а
@@ -162,9 +200,7 @@ Core.__index = Core
 local function unindex(core, bind)
     local list = bind.key and core.byKey[bind.key]
     if not list then return end
-    for i = #list, 1, -1 do
-        if list[i] == bind then table.remove(list, i) end
-    end
+    drop(list, bind)
     if #list == 0 then core.byKey[bind.key] = nil end
 end
 
@@ -196,16 +232,16 @@ local function press(core, code)
         if bind.enabled and bind:Gated() then
             bind.held = true
 
+            -- ДЕЙСТВИЕ ВЫПОЛНЯЕТСЯ ТЕМ ЖЕ Fire, ЧТО ОТДАН НАРУЖУ. Здесь стояла
+            -- его копия -- тот же pcall и то же предупреждение слово в слово, --
+            -- то есть нажатие клавиши и вызов из кода расходились бы на первой
+            -- же правке одного из двух.
             if bind.kind == "hold" then
                 bind:Set(true)
             elseif bind.kind == "toggle" then
                 bind:Set(not bind:Get())
             elseif bind.fire then
-                local ok, err = pcall(bind.fire)
-                if not ok then
-                    warn(("[NierUI] привязка %s: %s")
-                        :format(bind:Title(), tostring(err)))
-                end
+                bind:Fire()
             end
 
             core:notify(bind, "held")
@@ -227,6 +263,28 @@ local function release(core, code)
             core:notify(bind, "held")
         end
     end
+end
+
+-- ОТПУСТИТЬ УДЕРЖАНИЕ РУКАМИ, ПОТОМУ ЧТО КЛАВИША ЕГО УЖЕ НЕ ОТПУСТИТ.
+--
+-- Поводов четыре, и все про одно: между нажатием и отпусканием у привязки
+-- поменяли то, по чему release её находит. Сменили клавишу -- InputEnded придёт
+-- по старой, а привязки на ней уже нет. Выключили строку -- отпускание дойдёт,
+-- но гасить будет нечего, если состояние осталось включённым. Снесли запись или
+-- всё окно -- отпускание не дойдёт вовсе, подписки уже не существует.
+--
+-- Во всех четырёх случаях включённым осталось бы то, что человек считает
+-- отпущенным, а это хуже лишнего вызова. Четырьмя копиями этот десяток строк и
+-- лежал -- по одной на повод, и они уже начали расходиться: снос записи не
+-- сбрасывал held, снос окна сбрасывал его после вызова, а не до.
+--
+-- Уведомления отсюда НЕТ намеренно: у каждого повода своё («key», «enabled»,
+-- «removed»), и оно уходит следом за той правкой, которая его вызвала.
+-- Отдельное «held» значило бы два сообщения об одном действии.
+local function unhold(bind)
+    if not bind.held then return end
+    bind.held = false
+    if bind.kind == "hold" then bind:Set(false) end
 end
 
 --== подписки ================================================================
@@ -279,6 +337,15 @@ local function ensureInput(core)
 
         local code = codeOf(input)
         if not code then return end
+
+        -- ЛЕВАЯ КНОПКА ПРИ ОТКРЫТОМ МЕНЮ ПРИНАДЛЕЖИТ МЕНЮ, А НЕ ПРИВЯЗКЕ.
+        --
+        -- Ею щёлкают по строкам, таскают окна и открывают ожидание клавиши.
+        -- Одного processed для этого мало: он верен, только пока меню забирает
+        -- ввод себе, а при CaptureInput = false щелчок мимо окна приходит
+        -- необработанным -- и привязка срабатывала бы прямо во время настройки.
+        if code == Enum.UserInputType.MouseButton1 and window.visible then return end
+
         press(core, code)
     end))
 
@@ -314,8 +381,22 @@ function NierUI.bindCore(window)
     }, Core)
 end
 
+-- ПО КОПИИ, А НЕ ПО ЖИВОМУ СПИСКУ.
+--
+-- Подписчик вправе отписаться прямо в обработчике, и делает это не гипотетически:
+-- менеджер привязок на "added"/"removed"/"made" пересобирает своё содержимое,
+-- снос строк гасит их стоки, а в стоке каждой строки-редактора клавиши лежит её
+-- собственный unwatch -- то есть table.remove из ЭТОГО списка посреди обхода.
+--
+-- ipairs по укорачивающемуся списку перескакивает через соседа: подписчик,
+-- стоявший за менеджером, событие не получал вовсе. На экране это выглядело как
+-- список привязок, отстающий на одно действие, -- добавил привязку в менеджере,
+-- а в списке она появляется только после следующей правки.
+--
+-- Та же ошибка и то же лечение, что у обхода панелей в Window:Destroy и у
+-- Core.All, который копию отдаёт ровно по этой причине.
 function Core.notify(self, bind, what)
-    for _, fn in ipairs(self.watchers) do pcall(fn, bind, what) end
+    for _, fn in ipairs(table.clone(self.watchers)) do pcall(fn, bind, what) end
 end
 
 -- what -- ровно то, что ядро умеет сообщить, и другого не бывает:
@@ -336,11 +417,7 @@ end
 -- подписок, каждую из которых надо не забыть снять.
 function Core.Changed(self, fn)
     table.insert(self.watchers, fn)
-    return function()
-        for i = #self.watchers, 1, -1 do
-            if self.watchers[i] == fn then table.remove(self.watchers, i) end
-        end
-    end
+    return function() drop(self.watchers, fn) end
 end
 
 -- КОПИЯ, а не живой список: вид перебирает его и вполне может по дороге снять
@@ -350,7 +427,7 @@ function Core.All(self)
 end
 
 function Core.Get(self, name)
-    return self.byName[name] or nil
+    return self.byName[name]
 end
 
 --=============================================================================
@@ -363,6 +440,8 @@ end
 --   Key      стартовая клавиша. Нет -- NONE, и это рабочее состояние
 --   Kind     "toggle" | "hold" | "action"; по умолчанию выводится из действия
 --   Toggle   function(on) -- у привязки СВОЁ вкл/выкл, хранит его запись
+--   State    function() -> boolean -- ...если только хозяин не снаружи: тогда
+--            запись не хранит ничего и спрашивает. Только вместе с Toggle
 --   Action   function()   -- сработало и всё, состояния нет
 --
 -- и внутреннее, что дописывает виджет, -- строчными, как sink у палитры:
@@ -394,13 +473,41 @@ function Core.Add(self, opts)
             error("[NierUI] привязка либо переключает строку, либо имеет своё "
                 .. "состояние (Toggle) -- не то и другое разом", 3)
         end
-        local own = false
         owns = true
-        get = function() return own end
-        set = function(on)
-            own = on
-            opts.Toggle(on)
+
+        if opts.State then
+            --== ХОЗЯИН СНАРУЖИ: СПРАШИВАЕМ, А НЕ ХРАНИМ =====================
+            --
+            -- Своей копии тут нет НАМЕРЕННО, и дело не в экономии. Копия
+            -- расходится с правдой двумя разными способами сразу:
+            --
+            --   включение может НЕ СОСТОЯТЬСЯ -- в круге никого, цеплять
+            --   нечего, -- а записанное «включено» уже легло;
+            --
+            --   состояние может пропасть БЕЗ НАС -- цель умерла, ушла за
+            --   дистанцию, сменился раунд, -- и копия об этом не узнает вовсе.
+            --
+            -- Спрашивая, мы не можем ошибиться ни в том, ни в другом: ответ
+            -- всегда сегодняшний. Цена -- вызов на каждую перерисовку списка,
+            -- и это ровно тот обмен, который библиотека делает везде (см.
+            -- Gated и «НИЧЕГО НЕ КЕШИРУЕМ» в Hud).
+            get = opts.State
+            set = function(on) opts.Toggle(on) end
+        else
+            local own = false
+            get = function() return own end
+            set = function(on)
+                own = on
+                opts.Toggle(on)
+            end
         end
+    elseif opts.State then
+        -- State ОТВЕЧАЕТ НА ВОПРОС, а переключать состояние нечем -- такая
+        -- привязка была бы вечно inertна: нажали, спросили, ничего не
+        -- изменилось. У рубильника же хозяин известен и так -- это строка.
+        error("[NierUI] State без Toggle: спрашивать состояние есть у кого, а "
+            .. "переключать его нечем. Рубильнику State не нужен -- у него "
+            .. "хозяин строка", 3)
     end
 
     local stateful = get ~= nil and set ~= nil
@@ -441,6 +548,35 @@ function Core.Add(self, opts)
             .. "-- объяви привязку через Toggle, у неё есть состояние.", 3)
     end
 
+    --== ВОРОТА ==============================================================
+    --
+    -- Чьё состояние держит привязку закрытой. У РУБИЛЬНИКА их нет и быть не
+    -- может: он и есть то, что за воротами стоит, повесь их на него -- и
+    -- выключенную строку нечем будет включить. Рубильник узнаётся по тому, что
+    -- пара get/set пришла снаружи, а своего состояния у него нет.
+    --
+    -- ЧЕРЕЗ if, А НЕ ЧЕРЕЗ and/or. Здесь стояло
+    --
+    --     (not owns and opts.get) and false or (opts.gate or false)
+    --
+    -- и защиты не было вовсе: при ИСТИННОМ условии `X and false` даёт false, а
+    -- `false or Y` возвращает Y -- то есть обе ветки давали одно и то же,
+    -- `opts.gate`. Ровно та ловушка, на которой библиотека уже горела дважды:
+    -- у Backspace в захвате клавиши и в GetSetting списка.
+    --
+    -- Не стреляло только потому, что ни один нынешний вызывающий не даёт get и
+    -- gate разом. Но своему виджету заводить запись велено руками (см.
+    -- docs/extending.md), и там это выстрелило бы молча.
+    local gate = opts.gate or false
+    if not owns and opts.get then gate = false end
+
+    -- ОДНА ПРОВЕРКА НА ДВА ВЫВОДА. «Скриптер дал клавишу» отвечает разом на два
+    -- вопроса -- создана ли привязка и что класть в индекс, -- и считалось это
+    -- дважды, в двух местах, четырнадцатью строками друг от друга. Разъезжаются
+    -- такие пары молча: поправят одну, и запись окажется созданной, но
+    -- неиндексированной -- в списке стоит, а клавиша не работает.
+    local hasKey = typeof(opts.Key) == "EnumItem"
+
     local bind = setmetatable({
         core = self,
         name = name,
@@ -470,20 +606,21 @@ function Core.Add(self, opts)
         --
         -- Скриптер дал клавишу -- привязка готова сразу. Дал Bind = true --
         -- объявил ВОЗМОЖНОСТЬ, а создаст её человек.
-        made = typeof(opts.Key) == "EnumItem",
+        made = hasKey,
         enabled = opts.Enabled ~= false,
         row = opts.row or false,
-        -- РУБИЛЬНИК ВОРОТ НЕ ИМЕЕТ. Он и есть то, что за воротами стоит:
-        -- повесь их на него -- и выключенную строку нечем будет включить.
-        gate = (not owns and opts.get) and false or (opts.gate or false),
+        gate = gate,   -- посчитаны выше, вместе с разбором почему
         owns = owns,
+        -- Состояние живёт СНАРУЖИ и меняется мимо нас. Нужно ровно одному --
+        -- Sync: сообщать о чужой смене вправе только тот, кто её не хранит.
+        external = opts.Toggle ~= nil and opts.State ~= nil,
         get = get, set = set,
         fire = (not stateful) and opts.Action or nil,
     }, Bind)
 
     self.list[#self.list + 1] = bind
     if name then self.byName[name] = bind end
-    reindex(self, bind, typeof(opts.Key) == "EnumItem" and opts.Key or nil)
+    reindex(self, bind, hasKey and opts.Key or nil)
 
     ensureInput(self)
     self:notify(bind, "added")
@@ -504,10 +641,10 @@ function Core.Destroy(self)
     -- Залипшее же удержание -- не его решение, а наша недоделка: отпускание
     -- придёт в подписку, которой уже нет, и включённым останется то, что
     -- человек считает отпущенным.
-    for _, bind in ipairs(self.list) do
-        if bind.held and bind.kind == "hold" then pcall(bind.Set, bind, false) end
-        bind.held = false
-    end
+    --
+    -- Через pcall: снос обязан дойти до конца списка, а обработчик вызывающего
+    -- вправе упасть на любой записи.
+    for _, bind in ipairs(self.list) do pcall(unhold, bind) end
 
     table.clear(self.list)
     table.clear(self.byName)
@@ -607,12 +744,7 @@ function Bind.SetKey(self, key)
     end
     if key == self.key then return end
 
-    -- Держали старую -- отпускаем ЗДЕСЬ. Отпускание придёт по клавише, которой
-    -- у привязки уже нет, и до неё не дойдёт: удержание залипло бы навсегда.
-    if self.held then
-        self.held = false
-        if self.kind == "hold" then self:Set(false) end
-    end
+    unhold(self)
 
     reindex(self.core, self, key)
     -- Назначили клавишу той, которой ещё не существовало, -- значит создали.
@@ -668,12 +800,7 @@ function Bind.SetEnabled(self, on)
     if on == self.enabled then return end
     self.enabled = on
 
-    -- Выключили посреди удержания -- отпускаем: отпускание до нас дойдёт, но
-    -- гасить будет уже нечего, если состояние осталось включённым.
-    if not on and self.held then
-        self.held = false
-        if self.kind == "hold" then self:Set(false) end
-    end
+    if not on then unhold(self) end
 
     self.core:notify(self, "enabled")
 end
@@ -707,6 +834,29 @@ function Bind.Set(self, on)
         return
     end
     if self.owns then self.core:notify(self, "state") end
+end
+
+-- СОСТОЯНИЕ ПОМЕНЯЛОСЬ МИМО ПРИВЯЗКИ -- ХОЗЯИН ГОВОРИТ ОБ ЭТОМ САМ.
+--
+--     spear.watchTarget(function() bind:Sync() end)
+--
+-- Значение сюда не передаётся и не нужно: хранить его тут нечего, а спросить
+-- есть у кого. Sync -- это «правда изменилась, перечитайте», а не «вот новая».
+--
+-- Есть только у привязки с State, и это не придирка. У остальных о смене
+-- сообщает тот, кто состояние хранит: строка -- через NierUI.stateChanged, своё
+-- -- само ядро в Set. Разреши мы Sync им, одна смена слала бы два уведомления,
+-- и правило «хозяин всегда один» держалось бы на честном слове вызывающего.
+--
+-- Без этого экран отстаёт ровно там, где отставать больнее всего: цель умерла,
+-- захвата нет, а в списке горит [ON] -- до следующего нажатия чего угодно.
+function Bind.Sync(self)
+    if not self.external then
+        error("[NierUI] Sync есть только у привязки, чьё состояние живёт "
+            .. "снаружи (State): у остальных о смене сообщает тот, кто её "
+            .. "хранит, -- строка или само ядро", 2)
+    end
+    self.core:notify(self, "state")
 end
 
 -- ВОРОТА ЗАКРЫЛИСЬ -- ГАСИМ БЕЗУСЛОВНО.
@@ -769,13 +919,11 @@ end
 
 function Bind.Destroy(self)
     local core = self.core
-    if self.held and self.kind == "hold" then self:Set(false) end
+    unhold(self)
 
     unindex(core, self)
     if self.name then core.byName[self.name] = nil end
-    for i = #core.list, 1, -1 do
-        if core.list[i] == self then table.remove(core.list, i) end
-    end
+    drop(core.list, self)
     core:notify(nil, "removed")
 end
 
@@ -907,6 +1055,35 @@ function NierUI.bindRows(container, binds)
     end
 end
 
+--=============================================================================
+-- СЛЕДИТЬ ЗА ОДНОЙ ПРИВЯЗКОЙ -- ПРИМИТИВ, А НЕ ПРИЁМ
+--=============================================================================
+--
+-- Всякий редактор привязки показывает то, что правится и НЕ ЗДЕСЬ тоже: клавишу
+-- меняют из менеджера, режим -- из меню строки, подпись -- загрузкой профиля, и
+-- любое из трёх ещё и вызовом из кода. Ничего не кешируем -- перерисовываемся
+-- по поводу, а повод один на все источники, потому что источник правды один.
+--
+-- Разбор повода везде выходил дословно один и тот же -- «не моё событие --
+-- мимо; не моя привязка -- мимо; nil значит всех» -- плюс укладка снятия в сток
+-- контейнера. Копий набралось три: режим и имя здесь, клавиша в виджете
+-- Keybind. Средняя строка в них самая коварная: забудешь `changed ~= nil` --
+-- и вид перестанет обновляться на общих пересборках, забудешь `changed ~= bind`
+-- -- и каждая строка станет перерисовываться от чужих правок.
+--
+-- Снятие уезжает в сток КОНТЕЙНЕРА, а не окна: меню правой кнопки и список
+-- менеджера пересобираются, и подписка снесённого редактора иначе осталась бы в
+-- ядре навсегда, держа за собой уничтоженные объекты (см. NierUI.sink).
+function NierUI.bindWatch(container, bind, what, fn)
+    local unwatch = bind.core:Changed(function(changed, event)
+        if event ~= what then return end
+        if changed ~= nil and changed ~= bind then return end
+        fn()
+    end)
+    table.insert(NierUI.sink(container), { Disconnect = unwatch })
+    return unwatch
+end
+
 -- Что открывается по правой кнопке у строки клавиши. Здесь, а не в виджете:
 -- набор настроек -- свойство ПРИВЯЗКИ, и виджет о нём знать не должен.
 --
@@ -945,12 +1122,9 @@ function NierUI.bindOptions(container, bind, manage)
         -- менеджере, -- плюс загрузка профиля и SetKind из кода. Без слежения
         -- второй показывал бы прежнее значение до перезапуска, а щелчок по нему
         -- возвращал бы режим назад, ничего об этом не сказав.
-        local unkind = bind.core:Changed(function(changed, what)
-            if what ~= "kind" then return end
-            if changed ~= nil and changed ~= bind then return end
+        NierUI.bindWatch(container, bind, "kind", function()
             mode:Set(bind:Kind() == "hold" and "ЗАЖАТИЕ" or "ПЕРЕКЛ.", true)
         end)
-        table.insert(NierUI.sink(container), { Disconnect = unkind })
     end
 
     --== ИМЯ =================================================================
@@ -971,14 +1145,10 @@ function NierUI.bindOptions(container, bind, manage)
     })
 
     -- Подпись могли сменить не здесь: загрузкой профиля, вызовом SetTitle из
-    -- кода, менеджером привязок. Ничего не кешируем -- перерисовываемся по
-    -- поводу, как и строка клавиши.
-    local unwatch = bind.core:Changed(function(changed, what)
-        if what ~= "title" then return end
-        if changed ~= nil and changed ~= bind then return end
+    -- кода, менеджером привязок.
+    NierUI.bindWatch(container, bind, "title", function()
         name:Set(bind.titled or "", true)
     end)
-    table.insert(NierUI.sink(container), { Disconnect = unwatch })
 
     --== ДАЛЬШЕ -- ТОЛЬКО ИЗ МЕНЕДЖЕРА =======================================
     --
@@ -1046,6 +1216,11 @@ end
 -- добавляет следом, и на момент объявления менеджера привязок нет ещё ни одной.
 -- window.deferred ждёт ровно до конца постройки -- без опроса и без таймера.
 
+-- `or {}`, а не пустая таблица, и по той же причине, что в Window: ядро
+-- привязок собирается РАНЬШЕ окна (см. build.ps1), поэтому таблицу заводит вот
+-- эта строка, а окно её потом подхватывает. Присвоение пустой с любой из сторон
+-- затирало бы чужие методы молча -- метод не находился бы при том, что файл на
+-- месте. Разбор целиком -- у объявления в Window.
 NierUI.containerMethods = NierUI.containerMethods or {}
 
 function NierUI.containerMethods.Binds(self, opts)
@@ -1119,8 +1294,10 @@ function NierUI.containerMethods.Binds(self, opts)
         for _, entry in ipairs(listed) do
             -- Меню строки живёт на стоянке в gui, а не внутри неё: уничтожение
             -- строки его не заберёт, и на каждой пересборке они копились бы.
+            -- pcall без замыкания: пересборка идёт на каждую правку реестра, и
+            -- новая функция на каждую строку тут ни к чему. См. NierUI.drain.
             if entry.handle.menu then
-                pcall(function() entry.handle.menu:Destroy() end)
+                pcall(entry.handle.menu.Destroy, entry.handle.menu)
             end
         end
         table.clear(listed)
@@ -1136,10 +1313,7 @@ function NierUI.containerMethods.Binds(self, opts)
 
         -- И подписки снесённых строк -- туда же. Объекты уничтожены, а подписки
         -- на них живут в стоке своей жизнью и держат их за собой.
-        for _, conn in ipairs(listConns) do
-            pcall(function() conn:Disconnect() end)
-        end
-        table.clear(listConns)
+        NierUI.drain(listConns)
 
         list.rows = 0
     end
@@ -1235,7 +1409,7 @@ function NierUI.containerMethods.Binds(self, opts)
         setHeld(true)
         panel:Open({
             Anchor = row, Title = opts.Title or "ПРИВЯЗКИ",
-            Place = "binds\0" .. NierUI.util.randomName(),
+            Place = "binds\0" .. U.randomName(),
             OnClose = function()
                 open = false
                 setHeld(false)
@@ -1261,7 +1435,11 @@ end
 -- вторая дверь в захват клавиатуры -- ровно тот способ однажды получить
 -- взведённый навсегда счётчик, ради отсутствия которого всё и переносилось.
 
+-- Ядра может не быть вовсе: конструктор окна ставит его строкой ПОСЛЕ
+-- setmetatable, и до неё в поле лежит false. Читаем rawget'ом и отсутствие
+-- переносим -- «никто не ждёт» правдивый ответ и для окна на полпути к жизни.
 function NierUI.keyGrabbed(window)
     local core = window and rawget(window, "binds")
-    return core ~= nil and core ~= false and core.grab > 0
+    if not core then return false end
+    return core.grab > 0
 end

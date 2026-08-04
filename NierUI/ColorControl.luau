@@ -56,10 +56,19 @@ function NierUI.colorControl(parent, opts)
 
     local h, s, v = Color3.toHSV(opts.Color or Color3.fromRGB(255, 40, 40))
 
+    -- Ширина: число -- пиксели, ничего -- во всю ширину родителя. Ноль тут
+    -- пикселями и остаётся, потому что «во всю ширину» просят ОТСУТСТВИЕМ поля,
+    -- а не нулём: строка-палитра когда-то передавала Width = 0 и тут же
+    -- переписывала размер сама -- то есть просила нулевую ширину и чинила
+    -- последствия следующей строкой.
+    local size = opts.Width
+        and UDim2.fromOffset(opts.Width, fieldHeight + HEX_H)
+        or UDim2.new(1, 0, 0, fieldHeight + HEX_H)
+
     local holder = U.new("Frame", {
         BackgroundTransparency = 1,
         Position = opts.Position or UDim2.fromOffset(0, 0),
-        Size = UDim2.new(opts.Width and 0 or 1, opts.Width or 0, 0, fieldHeight + HEX_H),
+        Size = size,
         ZIndex = z,
     }, parent)
 
@@ -181,8 +190,9 @@ function NierUI.colorControl(parent, opts)
         fieldDot.Position = UDim2.fromScale(s, 1 - v)
         hueDot.Position = UDim2.fromScale(0.5, h)
         if not editing then hexBox.Text = U.hex(color()) end
-        if silent or not opts.Callback then return end
-        pcall(opts.Callback, color())
+        -- Тот же общий вызов, что у всех виджетов (см. NierUI.fire): своя копия
+        -- здесь молча глотала ошибку владельца палитры.
+        NierUI.fire(opts, silent, color())
     end
     render(true)
 
